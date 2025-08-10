@@ -1,0 +1,63 @@
+from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import ORJSONResponse
+from ..db.mongodb import get_db
+from ..events.rabbit import publish_event
+from ..dal import capability_dal as dal
+from ..models.capability_pack import CapabilityPackCreate, CapabilityPackUpdate
+
+router = APIRouter(prefix="/capability", tags=["capability"], default_response_class=ORJSONResponse)
+
+@router.post("/pack", status_code=201)
+async def create_pack(body: CapabilityPackCreate):
+    db = await get_db()
+    existing = await dal.get_pack(db, body.key, body.version)
+    if existing:
+        raise HTTPException(status_code=409, detail="Capability pack with key+version exists")
+    pack = await dal.create_pack(db, body)
+    publish_event("capability.pack.created", {"key": pack.key, "version": pack.version})
+    return pack
+
+@router.get("/pack/{key}/{version}")
+async def get_pack(key: str, version: str):
+    db = await get_db()
+    pack = await dal.get_pack(db, key, version)
+    if not pack:
+        raise HTTPException(status_code=404, detail="Not found")
+    return pack
+
+@router.get("/packs")
+async def list_packs(
+    key: str | None = Query(default=None),
+    q: str | None = Query(default=None, description="full-text search"),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+):
+    db = await get_db()
+    return await dal.list_packs(db, key, q, limit, offset)
+
+@router.put("/pack/{key}/{version}")
+async def update_pack(key: str, version: str, body: CapabilityPackUpdate):
+    db = await get_db()
+    pack = await dal.upsert_pack(db, key, version, body)
+    if not pack:
+        raise HTTPException(status_code=404, detail="Not found")
+    publish_event("capability.pack.updated", {"key": key, "version": version})
+    return pack
+
+@router.delete("/pack/{key}/{version}", status_code=204)
+async def delete_pack(key: str, version: str):
+    db = await get_db()
+    ok = await dal.delete_pack(db, key, version)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Not found")
+    publish_event("capability.pack.deleted", {"key": key, "version": version})
+    return ORJSONResponse(status_code=204, content=None)
+
+# Convenience: list playbooks for a pack
+@router.get("/pack/{key}/{version}/playbooks")
+async def list_playbooks(key: str, version: str):
+    db = await get_db()
+    pack = await dal.get_pack(db, key, version)
+    if not pack:
+        raise HTTPException(status_code=404, detail="Not found")
+    return pack.playbooks

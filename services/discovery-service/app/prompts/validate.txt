@@ -1,0 +1,2 @@
+Validate the CAM artifacts for internal consistency with AVC/FSS/PSS and flag issues.
+Return JSON: { "issues": [ { "artifact_id": "...", "severity":"...", "message":"..." } ] }

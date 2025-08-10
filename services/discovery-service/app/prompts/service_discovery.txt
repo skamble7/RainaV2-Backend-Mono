@@ -1,0 +1,10 @@
+You are generating CAM artifacts for service discovery.
+
+Output MUST be valid JSON (single object or array) with artifacts where:
+- "schema_version": "1.0"
+- "kind": one of ["cam.service_contract","cam.context_map","cam.capability_model","cam.document"]
+- "name": short human-readable title
+- "data": the structured payload (service definitions, interfaces, events, etc.)
+
+Prefer "cam.service_contract" artifacts: one per discovered service. Include a concise "name" for each (e.g., "Account Management Service").
+No extra prose; JSON only.

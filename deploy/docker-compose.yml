@@ -1,0 +1,68 @@
+services:
+  rabbitmq:
+    image: rabbitmq:3-management
+    restart: unless-stopped
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: raina
+      RABBITMQ_DEFAULT_PASS: raina
+
+  workspace-service:
+    build: ../services/workspace-service
+    env_file:
+      - ../services/workspace-service/.env.example
+    environment:
+      MONGO_URI: mongodb+srv://sandeepk:sandeep@cluster0.tnbpi.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0
+      MONGO_DB: RainaV2
+      RABBITMQ_URI: amqp://raina:raina@rabbitmq:5672/
+      RABBITMQ_EXCHANGE: raina.events
+      SERVICE_NAME: workspace-service
+    depends_on:
+      - rabbitmq
+    ports:
+      - "8010:8010"
+
+  artifact-service:
+    build:
+      context: ../services/artifact-service
+    container_name: artifact-service
+    environment:
+      MONGO_URI: mongodb+srv://sandeepk:sandeep@cluster0.tnbpi.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0
+      MONGO_DB: RainaV2
+      RABBITMQ_URI: amqp://raina:raina@rabbitmq:5672/
+      RABBITMQ_EXCHANGE: raina.events
+    depends_on:
+      - rabbitmq
+    ports:
+      - "8011:8011"
+
+  capability-registry:
+    build:
+      context: ../services/capability-registry
+    environment:
+      MONGO_URI: mongodb+srv://sandeepk:sandeep@cluster0.tnbpi.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0
+      MONGO_DB: RainaV2
+      RABBITMQ_URI: amqp://raina:raina@rabbitmq:5672/
+      RABBITMQ_EXCHANGE: raina.events
+    depends_on:
+      - rabbitmq
+    ports:
+      - "8012:8012"
+
+  discovery-service:
+    build:
+      context: ../services/discovery-service
+    env_file:
+      - ../services/discovery-service/.env.example
+    environment:
+      OPENAI_API_KEY: <OPENAI_API_KEY>
+      CAPABILITY_REGISTRY_URL: http://capability-registry:8012
+      ARTIFACT_SERVICE_URL: http://artifact-service:8011
+      RABBITMQ_URI: amqp://raina:raina@rabbitmq:5672/
+      RABBITMQ_EXCHANGE: raina.events
+    depends_on:
+      - rabbitmq  
+    ports:
+      - "8013:8013"
