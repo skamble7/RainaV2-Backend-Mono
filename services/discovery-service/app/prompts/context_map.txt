@@ -1,0 +1,10 @@
+Produce a single JSON object or array of CAM artifacts.
+Each artifact MUST include:
+- "schema_version": "1.0"
+- "kind": "cam.context_map"
+- "name": short title
+- "data": {
+  "contexts": [{ "name": "...", "responsibilities": [...], "owned_entities": [...] }],
+  "relationships": [{ "from": "...", "to": "...", "style": "upstream/downstream/supplier/consumer", "notes": "..." }]
+}
+No prose; JSON only.

@@ -66,3 +66,22 @@ services:
       - rabbitmq  
     ports:
       - "8013:8013"
+
+  guidance-service:
+    build:
+      context: ../services/guidance-service
+    container_name: guidance-service
+    env_file:
+      - ../services/guidance-service/.env.example   # <- matches your structure
+    environment:
+      # override or inject secrets at compose time if you want
+      OPENAI_API_KEY: <OPENAI_API_KEY>
+      ARTIFACT_SERVICE_URL: http://artifact-service:8011
+      RABBITMQ_URL: amqp://raina:raina@rabbitmq:5672/
+    volumes:
+      - ../services/guidance-service/output:/output
+    depends_on:
+      - artifact-service
+      - rabbitmq
+    ports:
+      - "8014:8014"   # host:container (service listens on 8014 in the container)

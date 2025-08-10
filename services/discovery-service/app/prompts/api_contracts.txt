@@ -1,0 +1,14 @@
+JSON artifacts:
+- "schema_version": "1.0"
+- "kind": "cam.document"
+- "name": "API Contracts"
+- "data": {
+  "doc_type": "api_contracts",
+  "services": [{
+    "name": "...",
+    "style": "rest|grpc",
+    "openapi": "<inline or link>",
+    "grpc_idl": "<inline .proto or link>"
+  }]
+}
+JSON only.

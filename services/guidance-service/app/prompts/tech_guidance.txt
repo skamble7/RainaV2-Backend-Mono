@@ -1,0 +1,16 @@
+You are an expert software architect. Synthesize a Technical Architecture & Design Guidance
+for the given workspace based on the provided CAM artifacts.
+
+Required sections:
+- overview
+- service_catalog
+- apis
+- events
+- nfrs
+- topology
+- observability
+- ops_runbooks
+- adrs
+
+For each section, produce concise markdown. Add measurable targets for NFRs.
+Reference source artifact IDs where relevant. Prefer actionable guidance for developers.

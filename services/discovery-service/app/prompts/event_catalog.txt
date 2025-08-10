@@ -1,0 +1,15 @@
+Output JSON of artifacts:
+- "schema_version": "1.0"
+- "kind": "cam.document"
+- "name": "Event Catalog"
+- "data": {
+  "doc_type": "event_catalog",
+  "events": [{
+    "name": "...",
+    "producer_service": "...",
+    "consumers": ["..."],
+    "schema": {"fields":[{"name":"...","type":"string|number|...","required":true}]},
+    "retention": "..."
+  }]
+}
+JSON only.

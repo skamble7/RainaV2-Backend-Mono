@@ -1,32 +1,45 @@
 import httpx
 from app.config import settings
 
-async def fetch_playbook(playbook_id: str) -> dict:
-    base = settings.CAPABILITY_REGISTRY_URL
-    timeout = settings.REQUEST_TIMEOUT_S
+class RegistryStandaloneResolver:
+    async def resolve(self, playbook_id: str) -> dict:
+        base = settings.CAPABILITY_REGISTRY_URL
+        async with httpx.AsyncClient(timeout=settings.REQUEST_TIMEOUT_S) as client:
+            r = await client.get(f"{base}/playbook/{playbook_id}")
+            if r.status_code == 200:
+                return r.json()
+            if r.status_code in (404, 405):
+                raise LookupError("standalone_not_found")
+            r.raise_for_status()
+        raise LookupError("standalone_not_found")
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        # 1) Try standalone endpoint if the registry ever exposes it
-        r = await client.get(f"{base}/playbook/{playbook_id}")
-        if r.status_code == 200:
-            return r.json()
-        if r.status_code not in (404, 405):
-            r.raise_for_status()  # other errors should surface
+class PackResolver:
+    def __init__(self, pack_key: str, pack_version: str):
+        self.pack_key = pack_key
+        self.pack_version = pack_version
 
-        # 2) Fallback: fetch pack and locate the playbook by id
-        p = await client.get(f"{base}/capability/pack/{settings.PACK_KEY}/{settings.PACK_VERSION}")
-        p.raise_for_status()
-        pack = p.json()
-        for pb in pack.get("playbooks", []):
-            if pb.get("id") == playbook_id:
-                # Normalize to the shape the planner/generator expects
-                return {
-                    "id": pb.get("id"),
-                    "name": pb.get("name"),
-                    "description": pb.get("description"),
-                    "steps": pb.get("steps", [])
-                }
-        raise httpx.HTTPStatusError(
-            f"Playbook '{playbook_id}' not found in pack {settings.PACK_KEY}/{settings.PACK_VERSION}",
-            request=p.request, response=p
-        )
+    async def resolve(self, playbook_id: str) -> dict:
+        base = settings.CAPABILITY_REGISTRY_URL
+        async with httpx.AsyncClient(timeout=settings.REQUEST_TIMEOUT_S) as client:
+            p = await client.get(f"{base}/capability/pack/{self.pack_key}/{self.pack_version}")
+            p.raise_for_status()
+            pack = p.json()
+            # return playbook + capability metadata so downstream can use produces_kinds
+            for pb in pack.get("playbooks", []) or []:
+                if pb.get("id") == playbook_id:
+                    return {"playbook": pb, "pack": pack}
+        raise LookupError(f"playbook {playbook_id} not found in pack {self.pack_key}/{self.pack_version}")
+
+class CompositeResolver:
+    def __init__(self, *resolvers):
+        self._resolvers = resolvers
+
+    async def resolve(self, playbook_id: str) -> dict:
+        last = None
+        for r in self._resolvers:
+            try:
+                return await r.resolve(playbook_id)
+            except LookupError as e:
+                last = e
+                continue
+        raise last or LookupError("No resolver succeeded")

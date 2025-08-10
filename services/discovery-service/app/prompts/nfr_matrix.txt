@@ -1,0 +1,13 @@
+JSON artifacts:
+- "schema_version": "1.0"
+- "kind": "cam.document"
+- "name": "NFR Matrix"
+- "data": {
+  "doc_type": "nfr_matrix",
+  "nfrs": [{
+    "category":"performance|reliability|security|compliance|observability",
+    "target": {"metric":"p99_latency_ms","value":250,"environment":"prod"},
+    "test_plan": {"method":"k6|chaos|pen-test","schedule":"weekly"}
+  }]
+}
+JSON only.

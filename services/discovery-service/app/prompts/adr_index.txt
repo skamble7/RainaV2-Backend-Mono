@@ -1,0 +1,15 @@
+JSON artifacts:
+- "schema_version": "1.0"
+- "kind": "cam.adr_index"
+- "name": "ADR Index"
+- "data": {
+  "adrs": [{
+    "title":"Saga vs 2PC",
+    "status":"Proposed|Accepted|Rejected",
+    "context":"...",
+    "decision":"...",
+    "consequences":"...",
+    "links":["..."]
+  }]
+}
+JSON only.

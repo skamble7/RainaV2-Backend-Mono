@@ -35,6 +35,7 @@ async def discover(workspace_id: str, req: StartDiscoveryRequest):
         "playbook_id": req.playbook_id,
         "model_id": model_id,
         "inputs": req.inputs.model_dump(),
+        "options": (req.options.model_dump() if req.options else {}),  # <-- add this line
         "artifacts": [],
         "logs": [],
         "errors": [],

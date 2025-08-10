@@ -1,9 +1,5 @@
-Generate CAM artifacts for sequence diagrams.
-
-Output MUST be valid JSON (single object or array) with artifacts where:
+Return JSON only. Each artifact MUST include:
 - "schema_version": "1.0"
 - "kind": "cam.sequence_diagram"
-- "name": short title of the flow (e.g., "Bill Payment Flow")
-- "data": diagram steps/participants
-
-No prose; JSON only.
+- "name": short title
+- "data": steps/participants

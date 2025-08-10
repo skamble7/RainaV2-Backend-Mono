@@ -1,0 +1,13 @@
+JSON artifacts:
+- "schema_version": "1.0"
+- "kind": "cam.document"
+- "name": "Runbooks & SLOs"
+- "data": {
+  "doc_type": "runbooks_slo",
+  "services": [{
+    "name":"...",
+    "slos":[{"metric":"availability","target":"99.9%","window":"30d"}],
+    "runbook":{"alerts":["..."],"diagnostics":["..."],"rollback_steps":["..."]}
+  }]
+}
+JSON only.

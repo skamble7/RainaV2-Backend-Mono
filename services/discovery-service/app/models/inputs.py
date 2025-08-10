@@ -28,3 +28,16 @@ class StartDiscoveryRequest(BaseModel):
     playbook_id: str
     inputs: DiscoveryInputs
     options: DiscoveryOptions | None = None
+
+class DiscoveryOptions(BaseModel):
+    model: str | None = None
+    dry_run: bool = False
+    validate: bool = True
+    # NEW: per-request pack override (falls back to env)
+    pack_key: str | None = None
+    pack_version: str | None = None
+
+class StartDiscoveryRequest(BaseModel):
+    playbook_id: str
+    inputs: DiscoveryInputs
+    options: DiscoveryOptions | None = None

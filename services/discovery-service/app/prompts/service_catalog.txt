@@ -1,0 +1,15 @@
+Output JSON (object or array) of artifacts with:
+- "schema_version": "1.0"
+- "kind": "cam.capability_model"
+- "name": "Service Catalog"
+- "data": {
+  "services": [{
+    "name": "...",
+    "responsibilities": [...],
+    "owner_team": "...",
+    "sla": {"availability": "...", "latency_ms_p99": ...},
+    "primary_datastore": {"type": "mongodb|postgres|...","name": "..."},
+    "interfaces": [{"style":"rest|grpc|events","name":"..."}]
+  }]
+}
+No prose.
