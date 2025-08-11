@@ -1,3 +1,8 @@
+You receive `inputs` containing AVC/FSS/PSS as above.  
+Respect `avc.constraints` (e.g., `cloud: aws`) and `pss.tech_stack` when choosing environments, clusters, and meshes.  
+Ensure each environment includes services relevant to its stage.  
+Link services back to their `story_keys`.
+
 JSON artifacts:
 - "schema_version": "1.0"
 - "kind": "cam.document"
@@ -6,7 +11,7 @@ JSON artifacts:
   "doc_type": "deployment_topology",
   "environments": [{
     "name":"dev|staging|prod",
-    "clusters":[{"name":"...", "mesh":"istio|linkerd|none", "gateways":["..."], "services":["..."]}]
+    "clusters":[{"name":"...", "mesh":"istio|linkerd|none", "gateways":["..."], "services":["..."], "story_keys": ["CARD-101"]}]
   }]
 }
 JSON only.

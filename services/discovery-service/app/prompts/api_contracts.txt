@@ -1,3 +1,8 @@
+You receive `inputs` containing AVC/FSS/PSS as above.  
+For each service with REST/gRPC endpoints, infer contract shape from story acceptance criteria and constraints.  
+Respect `pss.tech_stack` when picking protocol/style.  
+Include `story_keys` for traceability.
+
 JSON artifacts:
 - "schema_version": "1.0"
 - "kind": "cam.document"
@@ -8,7 +13,8 @@ JSON artifacts:
     "name": "...",
     "style": "rest|grpc",
     "openapi": "<inline or link>",
-    "grpc_idl": "<inline .proto or link>"
+    "grpc_idl": "<inline .proto or link>",
+    "story_keys": ["CARD-101"]
   }]
 }
 JSON only.

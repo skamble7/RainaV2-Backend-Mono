@@ -1,3 +1,7 @@
+You receive `inputs` containing AVC/FSS/PSS as above.  
+Decisions should arise from tradeoffs implied by `avc.constraints`, `avc.assumptions`, and `pss.paradigm/style`.  
+Include a `story_keys` array if a decision directly addresses a story requirement.
+
 JSON artifacts:
 - "schema_version": "1.0"
 - "kind": "cam.adr_index"
@@ -9,7 +13,8 @@ JSON artifacts:
     "context":"...",
     "decision":"...",
     "consequences":"...",
-    "links":["..."]
+    "links":["..."],
+    "story_keys": ["CARD-101"]
   }]
 }
 JSON only.

@@ -1,6 +1,69 @@
-Return JSON only (object or array). Each artifact MUST include:
+You receive structured discovery inputs:
+- avc: {
+    vision: string[],
+    problem_statements: string[],
+    goals: {id,text,metric?}[],
+    non_functionals: {type,target}[],
+    constraints: string[],
+    assumptions: string[],
+    context: {domain?: string, actors: string[]},
+    success_criteria: {kpi,target}[]
+  }
+- fss: { stories: {key,title,description,acceptance_criteria[],tags[]}[] }
+- pss: { paradigm: string, style: string[], tech_stack: string[] }
+
+Task:
+- Discover services that fulfill the FSS stories and align with AVC vision/goals.
+- Respect avc.constraints (e.g., "cloud: aws") and avc.non_functionals (e.g., performance/security).
+- Honor pss.paradigm/style (e.g., Microservices, Event‑Driven) and prefer pss.tech_stack when proposing interfaces/protocols.
+- Maintain **traceability**: each service and interface must include `story_keys` referencing fss.stories[].key.
+- Keep boundaries coherent: single responsibility, clear data ownership, minimal coupling.
+- If you infer asynchronous boundaries, surface them (this helps the event catalog later).
+
+Output format:
+Return **JSON only** (object or array). Prefer one `"cam.service_contract"` per discovered service.
+
+Each artifact MUST include:
 - "schema_version": "1.0"
-- "kind": one of ["cam.service_contract","cam.document"]
-- "name": a short title
-- "data": payload
-Prefer one "cam.service_contract" per discovered service.
+- "kind": one of ["cam.service_contract","cam.document"]  # prefer "cam.service_contract"
+- "name": short title
+- "data": {
+    "service": {
+      "name": "...",
+      "responsibilities": ["..."],
+      "owner_team": "...",
+      "story_keys": ["CARD-101","CARD-115"],
+      "interfaces": [
+        {
+          "style": "rest|grpc|events",
+          "name": "...",
+          "protocol": "http1.1|http2|grpc|nats|kafka|sns-sqs|...",
+          "version": "v1",
+          "story_keys": ["CARD-101"],
+          "notes": "why this interface exists"
+        }
+      ],
+      "operations": [
+        {
+          "name": "...",
+          "type": "command|query|event-producer|event-consumer",
+          "request_schema": { "fields":[{"name":"...","type":"string|number|...","required":true}] },
+          "response_schema": { "fields":[{"name":"...","type":"string|number|...","required":true}] },
+          "idempotency": "none|key:<field>|at-least-once",
+          "story_keys": ["CARD-101"]
+        }
+      ],
+      "primary_datastore": { "type":"mongodb|postgres|dynamodb|...", "name":"...", "ownership":"exclusive|shared" },
+      "dependencies": ["OtherServiceA","ExternalSystemB"],
+      "nfr_implications": [
+        { "category":"performance|reliability|security|compliance|observability",
+          "target":"p95<200ms|99.9%|...", "mitigation":"cache|circuit_breaker|oauth2|..." }
+      ],
+      "constraints_considered": ["cloud: aws","regulatory: soc2"]
+    }
+  }
+
+Rules:
+- No prose. JSON only.
+- Ensure every listed story key exists in inputs.fss.stories[].key.
+- Prefer explicit schemas for operations where acceptance criteria imply inputs/outputs.

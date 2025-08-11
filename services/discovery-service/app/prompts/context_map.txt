@@ -1,3 +1,7 @@
+You receive `inputs` containing AVC/FSS/PSS as above.  
+Contexts must map to domains in `fss.stories.tags` (`domain:*`) and responsibilities in AVC goals.  
+Relationships should reflect upstream/downstream dependencies implied by PSS style (e.g., Event-Driven: consumer/producer).
+
 Produce a single JSON object or array of CAM artifacts.
 Each artifact MUST include:
 - "schema_version": "1.0"

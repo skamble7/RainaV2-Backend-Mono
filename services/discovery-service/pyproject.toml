@@ -16,7 +16,8 @@ dependencies = [
   "python-dotenv>=1.0.1",
   "tenacity>=8.4.2",
   "structlog>=24.1.0",
-  "openai>=1.40.0"  # used by openai provider
+  "openai>=1.40.0",
+  "pymongo[srv]>=4.7.2"
 ]
 
 [tool.uvicorn]

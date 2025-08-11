@@ -1,3 +1,8 @@
+You receive `inputs` containing AVC/FSS/PSS as above.  
+For each service, derive SLOs from `avc.success_criteria` and `avc.non_functionals`.  
+Include alerts and diagnostics that would validate those SLOs.  
+Link to `story_keys` if applicable.
+
 JSON artifacts:
 - "schema_version": "1.0"
 - "kind": "cam.document"
@@ -7,7 +12,8 @@ JSON artifacts:
   "services": [{
     "name":"...",
     "slos":[{"metric":"availability","target":"99.9%","window":"30d"}],
-    "runbook":{"alerts":["..."],"diagnostics":["..."],"rollback_steps":["..."]}
+    "runbook":{"alerts":["..."],"diagnostics":["..."],"rollback_steps":["..."]},
+    "story_keys": ["CARD-101"]
   }]
 }
 JSON only.

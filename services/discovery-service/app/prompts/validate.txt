@@ -1,2 +1,7 @@
-Validate the CAM artifacts for internal consistency with AVC/FSS/PSS and flag issues.
-Return JSON: { "issues": [ { "artifact_id": "...", "severity":"...", "message":"..." } ] }
+Validate the CAM artifacts for internal consistency with AVC/FSS/PSS and flag issues.  
+Check that:
+- Every artifact references only valid `fss.stories[].key`.
+- NFRs, constraints, and success criteria have corresponding implementations in the generated artifacts.
+
+Return JSON:
+{ "issues": [ { "artifact_id": "...", "severity":"...", "message":"..." } ] }

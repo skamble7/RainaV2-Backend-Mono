@@ -1,4 +1,13 @@
-Output JSON (object or array) of artifacts with:
+You receive `inputs` containing:
+- `avc`: goals, constraints, non-functionals, actors, success criteria
+- `fss`: user stories with tags like `capability:*`, `domain:*`
+- `pss`: paradigm, styles, tech stack
+
+Generate services that fulfill the FSS stories, align with AVC goals, and respect constraints/NFRs.  
+For each service, include a `story_keys` array linking to `fss.stories[].key`.  
+Use `pss.paradigm/style` and `pss.tech_stack` to guide service boundaries and interface types.
+
+JSON only. Output JSON (object or array) of artifacts with:
 - "schema_version": "1.0"
 - "kind": "cam.capability_model"
 - "name": "Service Catalog"
@@ -9,7 +18,8 @@ Output JSON (object or array) of artifacts with:
     "owner_team": "...",
     "sla": {"availability": "...", "latency_ms_p99": ...},
     "primary_datastore": {"type": "mongodb|postgres|...","name": "..."},
-    "interfaces": [{"style":"rest|grpc|events","name":"..."}]
+    "interfaces": [{"style":"rest|grpc|events","name":"..."}],
+    "story_keys": ["CARD-101","CARD-102"]
   }]
 }
 No prose.

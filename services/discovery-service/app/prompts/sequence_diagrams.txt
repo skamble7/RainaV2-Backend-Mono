@@ -1,3 +1,7 @@
+You receive `inputs` containing AVC/FSS/PSS as above.  
+Participants should come from `avc.context.actors` plus relevant services from the service catalog linked to the story.  
+Produce at least one sequence per major story or actor interaction, ensuring lifelines reflect both human actors and system services.
+
 Return JSON only. Each artifact MUST include:
 - "schema_version": "1.0"
 - "kind": "cam.sequence_diagram"
