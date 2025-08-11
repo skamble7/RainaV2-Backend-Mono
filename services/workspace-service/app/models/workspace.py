@@ -1,19 +1,23 @@
-from pydantic import BaseModel, Field
+# app/models/workspace.py
+from pydantic import BaseModel, Field, ConfigDict
 from datetime import datetime
+from typing import Optional
 
 class WorkspaceCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
-    description: str | None = None
-    created_by: str | None = None  # user id/email; auth will enrich later
+    description: Optional[str] = None
+    created_by: Optional[str] = None
 
 class WorkspaceUpdate(BaseModel):
-    name: str | None = Field(default=None, min_length=1, max_length=200)
-    description: str | None = None
+    name: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    description: Optional[str] = None
 
 class Workspace(BaseModel):
-    id: str
+    # Optional but recommended
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
+    id: str = Field(..., alias="_id")   # ← critical
     name: str
-    description: str | None = None
-    created_by: str | None = None
+    description: Optional[str] = None
+    created_by: Optional[str] = None
     created_at: datetime
     updated_at: datetime

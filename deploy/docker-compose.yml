@@ -85,3 +85,18 @@ services:
       - rabbitmq
     ports:
       - "8014:8014"   # host:container (service listens on 8014 in the container)
+
+  notification-service:
+    build:
+      context: ../services/notification-service
+    environment:
+      RABBITMQ_URL: amqp://raina:raina@rabbitmq:5672/
+      RABBITMQ_EXCHANGE: raina.events
+      RABBITMQ_QUEUE: notification-service.v1
+      # optional: override bindings if needed
+      # RABBITMQ_BINDINGS: '["*.workspace.*.v1","*.artifact.*.v1","*.discovery.*.v1","*.guidance.*.v1","*.capability.*.v1","*.notification.*.v1","*.audit.*.v1","*.error.*.v1"]'
+    depends_on:
+      - rabbitmq
+    ports:
+      - "8016:8016"   # host:container (container listens on 8013)
+

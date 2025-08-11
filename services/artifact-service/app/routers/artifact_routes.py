@@ -1,3 +1,4 @@
+# app/routers/artifact_routes.py
 from copy import deepcopy
 import jsonpatch
 from fastapi import APIRouter, HTTPException, Header, Query, Response
@@ -6,7 +7,7 @@ from fastapi.responses import ORJSONResponse
 from ..db.mongodb import get_db
 from ..events.rabbit import publish_event
 from ..dal import artifact_dal as dal
-from ..models.artifact import ArtifactCreate, ArtifactReplace, ArtifactPatchIn
+from ..models.artifact import ArtifactItemCreate, ArtifactItemReplace, ArtifactItemPatchIn
 
 router = APIRouter(prefix="/artifact", tags=["artifact"], default_response_class=ORJSONResponse)
 
@@ -32,23 +33,22 @@ def _guard_if_match(expected: int | None, actual: int) -> None:
 
 
 # ─────────────────────────────────────────────────────────────
-# Create
+# Create embedded artifact under a workspace parent
 # ─────────────────────────────────────────────────────────────
 @router.post("/{workspace_id}", status_code=201)
-async def create_artifact(workspace_id: str, body: ArtifactCreate, response: Response):
+async def create_artifact(workspace_id: str, body: ArtifactItemCreate, response: Response):
     db = await get_db()
     if await dal.get_artifact_by_name(db, workspace_id, body.kind, body.name):
         raise HTTPException(status_code=409, detail="Artifact with same kind+name exists")
-    art = await dal.create_artifact(
-        db, workspace_id, body.kind, body.name, body.data, body.provenance
-    )
-    publish_event("artifact.created", art.model_dump(by_alias=True))
+
+    art = await dal.add_artifact(db, workspace_id, body, body.provenance)
+    publish_event("artifact.created", art.model_dump())
     response.headers["ETag"] = str(art.version)
     return art
 
 
 # ─────────────────────────────────────────────────────────────
-# List (filters + pagination)
+# List (filters + pagination over embedded items)
 # ─────────────────────────────────────────────────────────────
 @router.get("/{workspace_id}")
 async def list_artifacts(
@@ -70,6 +70,29 @@ async def list_artifacts(
         offset=offset,
     )
     return items
+
+
+# ─────────────────────────────────────────────────────────────
+# Parent doc (workspace + all artifacts)
+# ─────────────────────────────────────────────────────────────
+from ..models.artifact import WorkspaceArtifactsDoc  # add near your other imports
+
+@router.get("/{workspace_id}/parent", response_model=WorkspaceArtifactsDoc)
+async def get_workspace_with_artifacts(
+    workspace_id: str,
+    include_deleted: bool = Query(default=False, description="Include soft-deleted artifacts"),
+):
+    db = await get_db()
+    doc = await dal.get_parent_doc(db, workspace_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Workspace parent not found")
+
+    if include_deleted:
+        return doc
+
+    # return a copy with only active artifacts
+    filtered = [a for a in doc.artifacts if a.deleted_at is None]
+    return doc.model_copy(update={"artifacts": filtered}, deep=True)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -95,7 +118,6 @@ async def head_artifact(workspace_id: str, artifact_id: str, response: Response)
     if not art or art.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Not found")
     response.headers["ETag"] = str(art.version)
-    # No body; headers only
     return Response(status_code=200)
 
 
@@ -106,7 +128,7 @@ async def head_artifact(workspace_id: str, artifact_id: str, response: Response)
 async def replace_artifact(
     workspace_id: str,
     artifact_id: str,
-    body: ArtifactReplace,
+    body: ArtifactItemReplace,
     response: Response,
     if_match: str | None = Header(default=None, alias="If-Match"),
 ):
@@ -114,11 +136,12 @@ async def replace_artifact(
     art = await dal.get_artifact(db, workspace_id, artifact_id)
     if not art or art.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Not found")
+
     expected = _parse_if_match(if_match)
     _guard_if_match(expected, art.version)
 
-    updated = await dal.replace_artifact(db, art, body.data, body.provenance)
-    publish_event("artifact.updated", updated.model_dump(by_alias=True))
+    updated = await dal.replace_artifact(db, workspace_id, artifact_id, body.data, body.provenance)
+    publish_event("artifact.updated", updated.model_dump())
     response.headers["ETag"] = str(updated.version)
     return updated
 
@@ -130,12 +153,12 @@ async def replace_artifact(
 async def patch_artifact(
     workspace_id: str,
     artifact_id: str,
-    body: ArtifactPatchIn,
+    body: ArtifactItemPatchIn,
     response: Response,
     if_match: str | None = Header(default=None, alias="If-Match"),
 ):
     db = await get_db()
-    art = await dal.get_artifact(db, workspace_id, artifact_id)
+    art = await     dal.get_artifact(db, workspace_id, artifact_id)
     if not art or art.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Not found")
 
@@ -148,14 +171,22 @@ async def patch_artifact(
         raise HTTPException(status_code=400, detail=f"Invalid patch: {e}")
 
     from_version = art.version
-    updated = await dal.replace_artifact(db, art, new_data, body.provenance)
+    updated = await dal.replace_artifact(db, workspace_id, artifact_id, new_data, body.provenance)
+
     await dal.record_patch(
-        db, updated, from_version, updated.version, body.patch, body.provenance
+        db,
+        workspace_id=workspace_id,
+        artifact_id=artifact_id,
+        from_version=from_version,
+        to_version=updated.version,
+        patch=body.patch,
+        prov=body.provenance,
     )
+
     publish_event(
         "artifact.patched",
         {
-            "artifact": updated.model_dump(by_alias=True),
+            "artifact": updated.model_dump(),
             "from_version": from_version,
             "to_version": updated.version,
             "patch": body.patch,

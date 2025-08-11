@@ -11,7 +11,8 @@ router = APIRouter(prefix="/workspace", tags=["workspace"])
 @router.post("/", response_model=Workspace, status_code=201)
 async def create_ws(payload: WorkspaceCreate, db=Depends(get_db)):
     ws = await create_workspace(db, payload)
-    await publish_event("workspace.created", ws.model_dump())
+    # Use alias so _id is present in the event
+    await publish_event("workspace.created", ws.model_dump(by_alias=True))
     return ws
 
 @router.get("/", response_model=list[Workspace])
@@ -30,7 +31,7 @@ async def update_ws(wid: str, patch: WorkspaceUpdate, db=Depends(get_db)):
     ws = await update_workspace(db, wid, patch)
     if not ws:
         raise HTTPException(404, detail="Workspace not found")
-    await publish_event("workspace.updated", ws.model_dump())
+    await publish_event("workspace.updated", ws.model_dump(by_alias=True))
     return ws
 
 @router.delete("/{wid}", status_code=204)
@@ -38,5 +39,6 @@ async def delete_ws_route(wid: str, db=Depends(get_db)):
     ok = await delete_workspace(db, wid)
     if not ok:
         raise HTTPException(404, detail="Workspace not found")
-    await publish_event("workspace.deleted", {"id": wid})
+    # Keep id alias consistent for consumers
+    await publish_event("workspace.deleted", {"_id": wid})
     return None
