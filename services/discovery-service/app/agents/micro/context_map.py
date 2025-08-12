@@ -1,82 +1,54 @@
 # app/agents/micro/context_map.py
 from __future__ import annotations
-
 from pathlib import Path
-from typing import Dict, Any, List
-import hashlib
 import json
-
+from typing import Dict, Any
 from app.agents.spi import RainaAgent, AgentResult, ContextEnvelope
 from app.llms.registry import get_provider
+from app.diagrams.drawio import simple_grid
 
 PROMPT = Path(__file__).resolve().parents[2] / "prompts" / "context_map.txt"
 
-
-def _sha256_text(text: str) -> str:
-    h = hashlib.sha256()
-    h.update(text.encode("utf-8"))
-    return h.hexdigest()
-
-
 class ContextMapAgent:
+    # ← This is the value you reference in the pack
     id = "decomposer.context_map.v1"
     provides = [{"kind": "cam.context_map"}]
-    requires: List[Dict[str, Any]] = []  # future: require AVC/FSS/PSS or domain notes
+    requires = []  # (we'll add dependencies in Phase 2)
     supports = {"paradigms": ["service-based"], "styles": ["microservices"]}
     version = "1.0.0"
 
     async def run(self, ctx: ContextEnvelope, params: Dict[str, Any]) -> AgentResult:
-        """
-        Phase-1 agent wrapper:
-        - Calls the context_map prompt
-        - Ensures each emitted item has kind=cam.context_map
-        - Adds a default name if missing
-        - Emits upsert-style patches for backward compatibility
-        - Telemetry includes a prompt hash
-        """
         provider = get_provider(params.get("model_id"))
-        prompt_text = PROMPT.read_text()
-        prompt_hash = _sha256_text(prompt_text)
-
         msgs = [
-            {"role": "system", "content": prompt_text},
-            {
-                "role": "user",
-                "content": json.dumps(
-                    {
-                        "inputs": {"avc": ctx.get("avc", {}), "fss": ctx.get("fss", {}), "pss": ctx.get("pss", {})},
-                        "params": params,
-                    },
-                    separators=(",", ":"),
-                ),
-            },
-        ]
-
-        # Try strict JSON; if it fails, wrap raw content as a diagnostic artifact
-        try:
-            content = await provider.chat_json(msgs)
-            parsed = json.loads(content)
-        except Exception as e:
-            diag = {
-                "kind": "cam.context_map",
-                "name": "Cards Microservices Context Map (non-JSON fallback)",
-                "data": {
-                    "note": "Model returned non-JSON; captured raw string for troubleshooting.",
-                    "raw": str(getattr(e, "args", [""])[0])[:2000],
-                },
+            {"role": "system", "content": PROMPT.read_text()},
+            {"role": "user", "content": json.dumps(
+                {"inputs": {"avc": ctx["avc"], "fss": ctx["fss"], "pss": ctx["pss"]},
+                 "params": params}, separators=(",", ":"))
             }
-            patches = [{"op": "upsert", "path": "/artifacts", "value": diag}]
-            return {"patches": patches, "telemetry": [{"agent": self.id, "prompt_hash": prompt_hash, "fallback": True}]}
+        ]
+        content = await provider.chat_json(msgs)
+        item = json.loads(content)
+        if isinstance(item, list):
+            item = item[0]
 
-        items = parsed if isinstance(parsed, list) else [parsed]
-        norm: List[Dict[str, Any]] = []
-        for it in items:
-            if not isinstance(it, dict):
-                continue
-            # Ensure correct CAM kind and a reasonable default name
-            it.setdefault("kind", "cam.context_map")
-            it.setdefault("name", "Cards Microservices Context Map")
-            norm.append(it)
+        # Ensure kind + name
+        item.setdefault("kind", "cam.context_map")
+        item.setdefault("name", "Cards Microservices Context Map")
 
-        patches = [{"op": "upsert", "path": "/artifacts", "value": it} for it in norm]
-        return {"patches": patches, "telemetry": [{"agent": self.id, "prompt_hash": prompt_hash}]}
+        # Draw.io
+        contexts = item.get("data", {}).get("contexts", [])
+        rels = item.get("data", {}).get("relationships", [])
+        nodes = [{"id": f"ctx_{i}", "label": c.get("name", "Context")} for i, c in enumerate(contexts)]
+        name_to_id = {c.get("name", ""): f"ctx_{i}" for i, c in enumerate(contexts)}
+        edges = []
+        for i, r in enumerate(rels):
+            s = name_to_id.get(r.get("from", ""), nodes[0]["id"] if nodes else "ctx_0")
+            t = name_to_id.get(r.get("to", ""), nodes[-1]["id"] if nodes else "ctx_0")
+            edges.append({"id": f"e{i}", "source": s, "target": t, "label": r.get("style", "")})
+        item.setdefault("data", {}).setdefault("diagram_format", "drawio")
+        item["data"]["drawio_xml"] = simple_grid(nodes, edges, item["name"])
+
+        return {
+            "patches": [{"op": "upsert", "path": "/artifacts", "value": item}],
+            "telemetry": [{"agent": self.id}],
+        }

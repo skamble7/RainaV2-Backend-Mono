@@ -61,6 +61,8 @@ async def _run_discovery(req: StartDiscoveryRequest, run_id: UUID4):
     run_graph = build_graph()
     model_id = (req.options.model if req.options else None) or settings.MODEL_ID
 
+    logger.info("discovery.options.received %s", (req.options.model_dump(by_alias=True) if req.options else {}))
+
     state: DiscoveryState = {
         "workspace_id": str(req.workspace_id),
         "playbook_id": req.playbook_id,

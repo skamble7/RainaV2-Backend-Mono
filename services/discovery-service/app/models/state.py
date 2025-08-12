@@ -5,6 +5,7 @@ class DiscoveryState(TypedDict, total=False):
     playbook_id: str
     model_id: str
     inputs: dict
+    options: dict
     plan: dict
     artifacts: List[dict]           # CAM artifacts ready for persistence
     validations: List[dict]
