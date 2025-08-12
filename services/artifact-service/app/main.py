@@ -15,8 +15,16 @@ from .dal import artifact_dal
 from .events.workspace_consumer import run_workspace_created_consumer
 from .config import settings
 
+# NEW: correlation IDs middleware + logging filter
+from .middleware.correlation import CorrelationIdMiddleware, CorrelationIdFilter
+
 configure_logging()
 log = logging.getLogger(__name__)
+
+# Attach correlation filter to key loggers (root + uvicorn)
+_corr_filter = CorrelationIdFilter()
+for name in ("", "uvicorn.access", "uvicorn.error", __name__.split(".")[0] or "app"):
+    logging.getLogger(name).addFilter(_corr_filter)
 
 # Background task handles
 _shutdown_event: asyncio.Event | None = None
@@ -58,11 +66,16 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)
 
+# NEW: add correlation middleware so every request/response carries IDs
+app.add_middleware(CorrelationIdMiddleware)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_methods=["*"],
-    allow_headers=["*"],
+    # Explicitly allow correlation headers (["*"] generally covers this, but being explicit helps in some setups)
+    allow_headers=["*", "x-request-id", "x-correlation-id"],
+    expose_headers=["x-request-id", "x-correlation-id"],
 )
 
 # Routers
