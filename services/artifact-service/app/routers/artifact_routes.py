@@ -42,7 +42,10 @@ async def create_artifact(workspace_id: str, body: ArtifactItemCreate, response:
         raise HTTPException(status_code=409, detail="Artifact with same kind+name exists")
 
     art = await dal.add_artifact(db, workspace_id, body, body.provenance)
-    publish_event("artifact.created", art.model_dump())
+    try:
+        publish_event("artifact.created", art.model_dump())
+    except Exception:
+        pass
     response.headers["ETag"] = str(art.version)
     return art
 
