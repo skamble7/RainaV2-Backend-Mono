@@ -1,50 +1,49 @@
-from fastapi import WebSocket, WebSocketDisconnect
-from collections import defaultdict, deque
-from typing import Dict, Set, Tuple
-from .settings import settings
-from .logger import get_logger
+# app/websocket_manager.py
+import asyncio
+import json
+from typing import Set, Union
+from fastapi import WebSocket
+from app.logger import logger  # expects module-level `logger` instance
 
-log = get_logger("ws")
+class WebSocketManager:
+    def __init__(self) -> None:
+        self._clients: Set[WebSocket] = set()
+        self._lock = asyncio.Lock()
 
-class WebSocketHub:
-    """
-    Rooms are keyed by (tenant_id, workspace_id).
-    Keeps a small per-room replay buffer.
-    """
-    def __init__(self):
-        self.active: Dict[Tuple[str,str], Set[WebSocket]] = defaultdict(set)
-        self.buffer: Dict[Tuple[str,str], deque] = defaultdict(lambda: deque(maxlen=settings.BUFFER_SIZE_PER_WORKSPACE))
+    async def connect(self, websocket: WebSocket) -> None:
+        await websocket.accept()
+        async with self._lock:
+            self._clients.add(websocket)
+        logger.info("WebSocket connected; total=%d", len(self._clients))
 
-    def room_key(self, tenant_id: str, workspace_id: str) -> tuple[str,str]:
-        return (tenant_id or "t-unknown", workspace_id or "w-unknown")
+    async def disconnect(self, websocket: WebSocket) -> None:
+        async with self._lock:
+            self._clients.discard(websocket)
+        logger.info("WebSocket disconnected; total=%d", len(self._clients))
 
-    async def connect(self, ws: WebSocket, tenant_id: str, workspace_id: str):
-        await ws.accept()
-        key = self.room_key(tenant_id, workspace_id)
-        self.active[key].add(ws)
-        log.info(f"WS connected: {key} total={len(self.active[key])}")
+    async def broadcast(self, message: Union[str, dict, list]) -> None:
+        # normalize to text
+        if not isinstance(message, str):
+            message = json.dumps(message, separators=(",", ":"))
 
-    def disconnect(self, ws: WebSocket, tenant_id: str, workspace_id: str):
-        key = self.room_key(tenant_id, workspace_id)
-        self.active[key].discard(ws)
-        log.info(f"WS disconnected: {key} total={len(self.active[key])}")
+        async with self._lock:
+            clients = list(self._clients)
 
-    async def send(self, tenant_id: str, workspace_id: str, message: dict):
-        key = self.room_key(tenant_id, workspace_id)
-        # store in replay buffer
-        self.buffer[key].append(message)
-        dead = []
-        for ws in list(self.active[key]):
+        if not clients:
+            return
+
+        stale: list[WebSocket] = []
+        for ws in clients:
             try:
-                await ws.send_json(message)
+                await ws.send_text(message)
             except Exception:
-                dead.append(ws)
-        for ws in dead:
-            self.active[key].discard(ws)
+                stale.append(ws)
 
-    async def replay(self, ws: WebSocket, tenant_id: str, workspace_id: str):
-        key = self.room_key(tenant_id, workspace_id)
-        for msg in list(self.buffer[key]):
-            await ws.send_json(msg)
+        if stale:
+            async with self._lock:
+                for ws in stale:
+                    self._clients.discard(ws)
+            logger.info("Pruned %d stale WebSocket(s); total=%d", len(stale), len(self._clients))
 
-hub = WebSocketHub()
+websocket_manager = WebSocketManager()
+__all__ = ["WebSocketManager", "websocket_manager"]

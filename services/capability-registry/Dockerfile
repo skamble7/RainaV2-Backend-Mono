@@ -1,7 +1,35 @@
 FROM python:3.12-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
 WORKDIR /app
-COPY pyproject.toml /app/
-RUN pip install --no-cache-dir uvicorn fastapi pydantic motor orjson pika
-COPY app /app/app
-ENV PYTHONUNBUFFERED=1
+
+# 1) Install shared libs (editable) — copy project root + package dir
+COPY libs/pyproject.toml /tmp/libs/pyproject.toml
+COPY libs /tmp/libs/libs
+RUN pip install --no-cache-dir -e /tmp/libs
+
+# (optional) sanity check
+RUN python - <<'PY'
+import importlib
+m = importlib.import_module("libs.raina_common.events")
+print("OK:", m.__file__)
+PY
+
+# -------------------------------
+# 2) Install service dependencies
+# -------------------------------
+COPY services/capability-registry/pyproject.toml /app/pyproject.toml
+RUN pip install --no-cache-dir .
+
+# -------------------------------
+# 3) Copy the service code
+# -------------------------------
+COPY services/capability-registry/app /app/app
+
+# -------------------------------
+# 4) Run service
+# -------------------------------
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8012"]

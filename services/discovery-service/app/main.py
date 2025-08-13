@@ -1,4 +1,6 @@
 # app/main.py
+from __future__ import annotations
+
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends
 from fastapi.responses import ORJSONResponse
 from pydantic import UUID4
@@ -15,7 +17,7 @@ from app.logging import setup_logging
 from app.models.discovery import StartDiscoveryRequest
 from app.models.state import DiscoveryState
 from app.graphs.discovery_graph import build_graph
-from app.infra.rabbit import publish_event
+from app.infra.rabbit import publish_event_v1  # ← versioned events API
 
 from app.models.discovery import DiscoveryRun
 from app.db.discovery_runs import (
@@ -60,7 +62,7 @@ _corr_filter = CorrelationIdFilter()
 for _name in ("", "uvicorn", "uvicorn.access", "uvicorn.error", "app"):
     logging.getLogger(_name).addFilter(_corr_filter)
 
-# Helper to grab current correlation headers for outbound calls
+# Helper to grab current correlation headers for outbound calls (HTTP + events)
 def _corr_headers() -> dict:
     hdrs = {}
     try:
@@ -135,12 +137,19 @@ async def _run_discovery(req: StartDiscoveryRequest, run_id: UUID4):
     except Exception:
         logger.exception("Failed to set run status to running", extra=safe_extra({"run_id": str(run_id)}))
 
-    publish_event("discovery.started", str(req.workspace_id), {
-        "run_id": str(run_id),
-        "playbook_id": req.playbook_id,
-        "model_id": model_id,
-        "received_at": start_ts.isoformat()
-    })
+    # raina.discovery.started.v1
+    publish_event_v1(
+        org=settings.EVENTS_ORG,
+        event="started",
+        payload={
+            "run_id": str(run_id),
+            "workspace_id": str(req.workspace_id),
+            "playbook_id": req.playbook_id,
+            "model_id": model_id,
+            "received_at": start_ts.isoformat(),
+        },
+        headers=_corr_headers(),
+    )
 
     try:
         result = await run_graph.ainvoke(state)
@@ -158,12 +167,20 @@ async def _run_discovery(req: StartDiscoveryRequest, run_id: UUID4):
         }
 
         set_status(db, run_id, "completed", result_summary=summary, result_artifacts_ref=None)
-        publish_event("discovery.completed", str(req.workspace_id), summary)
+
+        # raina.discovery.completed.v1
+        publish_event_v1(
+            org=settings.EVENTS_ORG,
+            event="completed",
+            payload=summary,
+            headers=_corr_headers(),
+        )
 
     except Exception as e:
         logger.exception("discovery_failed", extra=safe_extra({"run_id": str(run_id)}))
         fail_payload = {
             "run_id": str(run_id),
+            "workspace_id": str(req.workspace_id),
             "error": str(e),
             "logs": state.get("logs", []),
             "errors": state.get("errors", []),
@@ -175,7 +192,14 @@ async def _run_discovery(req: StartDiscoveryRequest, run_id: UUID4):
             set_status(get_db(), run_id, "failed", error=str(e))
         except Exception:
             logger.exception("Failed to set run status to failed", extra=safe_extra({"run_id": str(run_id)}))
-        publish_event("discovery.failed", str(req.workspace_id), fail_payload)
+
+        # raina.discovery.failed.v1
+        publish_event_v1(
+            org=settings.EVENTS_ORG,
+            event="failed",
+            payload=fail_payload,
+            headers=_corr_headers(),
+        )
 
 # ---- endpoints ----------------------------------------------------------
 @app.post("/discover/{workspace_id}", status_code=202)

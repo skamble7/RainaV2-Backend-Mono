@@ -1,4 +1,3 @@
-# app/events/workspace_consumer.py
 from __future__ import annotations
 
 import asyncio
@@ -11,142 +10,84 @@ from ..config import settings
 from ..dal import artifact_dal as dal
 from ..models.artifact import WorkspaceSnapshot
 
-log = logging.getLogger(__name__)
+# Common event RK builder
+from libs.raina_common.events import rk, Service, Version
+
+log = logging.getLogger("app.events.workspace_consumer")
+
+# Build the three routing keys we care about (created/updated/deleted)
+_RK_CREATED = rk(settings.events_org, Service.WORKSPACE, "created")
+_RK_UPDATED = rk(settings.events_org, Service.WORKSPACE, "updated")
+_RK_DELETED = rk(settings.events_org, Service.WORKSPACE, "deleted")
 
 
-async def _handle_message(db: AsyncIOMotorDatabase, body: bytes) -> None:
-    try:
-        payload = json.loads(body.decode("utf-8"))
-    except Exception as e:
-        log.exception("Invalid JSON on workspace.created: %s", e)
-        return
-
-    # Accept flat or wrapped payload
-    try:
-        ws = WorkspaceSnapshot.model_validate(payload)
-    except Exception:
-        if "workspace" in payload:
-            ws = WorkspaceSnapshot.model_validate(payload["workspace"])
-        else:
-            log.error("workspace.created payload missing workspace fields: %s", payload)
-            return
-
-    ws_id = ws.id
-
-    # Idempotent parent creation
-    if await dal.get_parent_doc(db, ws_id):
-        log.info("WorkspaceArtifactsDoc already exists for workspace_id=%s", ws_id)
-        return
-
-    created = await dal.create_parent_doc(db, ws)
-    log.info("Created WorkspaceArtifactsDoc: workspace_id=%s, doc_id=%s", ws_id, created.id)
-
-
-async def run_workspace_created_consumer(db: AsyncIOMotorDatabase, shutdown_event: asyncio.Event) -> None:
-    """
-    Long-running consumer. Reconnects on failure. Stops when shutdown_event is set.
-    """
-    while not shutdown_event.is_set():
-        try:
-            connection = await aio_pika.connect_robust(settings.rabbitmq_uri)
-            async with connection:
-                channel = await connection.channel()
-                await channel.set_qos(prefetch_count=1)
-
-                exchange = await channel.declare_exchange(
-                    settings.rabbitmq_exchange, aio_pika.ExchangeType.TOPIC, durable=True
-                )
-
-                queue = await channel.declare_queue(
-                    settings.consumer_queue_ws_created, durable=True
-                )
-                await queue.bind(exchange, routing_key=settings.workspace_created_rk)
-
-                log.info(
-                    "Consuming queue=%s exchange=%s rk=%s",
-                    settings.consumer_queue_ws_created,
-                    settings.rabbitmq_exchange,
-                    settings.workspace_created_rk,
-                )
-
-                async with queue.iterator() as q:
-                    async for message in q:
-                        if shutdown_event.is_set():
-                            break
-                        async with message.process(requeue=False):
-                            await _handle_message(db, message.body)
-
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            log.exception("workspace.created consumer error; retrying in 3s: %s", e)
-            await asyncio.sleep(3.0)
-
-    log.info("workspace.created consumer stopped")
-
-# add small helpers
-async def _normalize_payload(payload: dict) -> dict:
+async def _handle_message_created(db: AsyncIOMotorDatabase, payload: dict) -> None:
     data = payload.get("workspace", payload)
     if "_id" not in data and "id" in data:
-      data = {**data, "_id": data["id"]}
-    return data
-
-async def _on_created(db, payload: dict):
-    data = await _normalize_payload(payload)
+        data = {**data, "_id": data["id"]}
     ws = WorkspaceSnapshot.model_validate(data)
+
+    # Idempotent parent creation
     if await dal.get_parent_doc(db, ws.id):
         log.info("Parent already exists for workspace_id=%s", ws.id)
         return
+
     created = await dal.create_parent_doc(db, ws)
     log.info("Created WorkspaceArtifactsDoc: workspace_id=%s, doc_id=%s", ws.id, created.id)
 
-async def _on_updated(db, payload: dict):
-    data = await _normalize_payload(payload)
+
+async def _handle_message_updated(db: AsyncIOMotorDatabase, payload: dict) -> None:
+    data = payload.get("workspace", payload)
+    if "_id" not in data and "id" in data:
+        data = {**data, "_id": data["id"]}
     ws = WorkspaceSnapshot.model_validate(data)
     await dal.refresh_workspace_snapshot(db, ws)
     log.info("Refreshed workspace snapshot for workspace_id=%s", ws.id)
 
-# app/events/workspace_consumer.py
 
-async def _on_deleted(db, payload: dict):
-    # accept flat or wrapped payload
+async def _handle_message_deleted(db: AsyncIOMotorDatabase, payload: dict) -> None:
     data = payload.get("workspace", payload)
     wid = data.get("_id") or data.get("id")
     if not wid:
         log.error("workspace.deleted payload missing id/_id: %s", payload)
         return
-
     ok = await dal.delete_parent_doc(db, wid)
     log.info("Deleted parent doc for workspace_id=%s (ok=%s)", wid, ok)
 
 
 async def run_workspace_created_consumer(db: AsyncIOMotorDatabase, shutdown_event: asyncio.Event) -> None:
+    """
+    Long-running consumer for workspace lifecycle events.
+    Reconnects on failure. Stops when shutdown_event is set.
+    """
+    queue_name = settings.consumer_queue_workspace  # durable named queue by default (can be "" for anonymous)
+
     while not shutdown_event.is_set():
         try:
+            log.info("Connecting to RabbitMQ at %s ...", settings.rabbitmq_uri)
             connection = await aio_pika.connect_robust(settings.rabbitmq_uri)
             async with connection:
                 channel = await connection.channel()
-                await channel.set_qos(prefetch_count=1)
+                await channel.set_qos(prefetch_count=16)
 
                 exchange = await channel.declare_exchange(
                     settings.rabbitmq_exchange, aio_pika.ExchangeType.TOPIC, durable=True
                 )
 
                 queue = await channel.declare_queue(
-                    settings.consumer_queue_ws_created, durable=True
+                    queue_name or "",  # empty => anonymous auto-delete queue
+                    durable=True if queue_name else False,
+                    auto_delete=False if queue_name else True,
                 )
-                # Bind to created/updated/deleted
-                await queue.bind(exchange, routing_key=settings.workspace_created_rk)
-                await queue.bind(exchange, routing_key=getattr(settings, "workspace_updated_rk", "workspace.updated"))
-                await queue.bind(exchange, routing_key=getattr(settings, "workspace_deleted_rk", "workspace.deleted"))
+
+                # Bind to the three versioned keys
+                await queue.bind(exchange, routing_key=_RK_CREATED)
+                await queue.bind(exchange, routing_key=_RK_UPDATED)
+                await queue.bind(exchange, routing_key=_RK_DELETED)
 
                 log.info(
-                    "Consuming queue=%s exchange=%s rk=[%s, %s, %s]",
-                    settings.consumer_queue_ws_created,
-                    settings.rabbitmq_exchange,
-                    settings.workspace_created_rk,
-                    getattr(settings, "workspace_updated_rk", "workspace.updated"),
-                    getattr(settings, "workspace_deleted_rk", "workspace.deleted"),
+                    "Consuming queue=%s exchange=%s rks=[%s, %s, %s]",
+                    queue.name, settings.rabbitmq_exchange, _RK_CREATED, _RK_UPDATED, _RK_DELETED
                 )
 
                 async with queue.iterator() as q:
@@ -154,21 +95,21 @@ async def run_workspace_created_consumer(db: AsyncIOMotorDatabase, shutdown_even
                         if shutdown_event.is_set():
                             break
                         async with message.process(requeue=False):
-                            rk = message.routing_key
                             try:
                                 payload = json.loads(message.body.decode("utf-8"))
                             except Exception as e:
                                 log.exception("Invalid JSON: %s", e)
                                 continue
 
-                            if rk == settings.workspace_created_rk:
-                                await _on_created(db, payload)
-                            elif rk == getattr(settings, "workspace_updated_rk", "workspace.updated"):
-                                await _on_updated(db, payload)
-                            elif rk == getattr(settings, "workspace_deleted_rk", "workspace.deleted"):
-                                await _on_deleted(db, payload)
+                            rk_in = message.routing_key
+                            if rk_in == _RK_CREATED:
+                                await _handle_message_created(db, payload)
+                            elif rk_in == _RK_UPDATED:
+                                await _handle_message_updated(db, payload)
+                            elif rk_in == _RK_DELETED:
+                                await _handle_message_deleted(db, payload)
                             else:
-                                log.warning("Unhandled routing key: %s", rk)
+                                log.warning("Unhandled routing key: %s", rk_in)
 
         except asyncio.CancelledError:
             break

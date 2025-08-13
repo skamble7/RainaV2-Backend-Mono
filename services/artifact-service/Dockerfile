@@ -1,17 +1,29 @@
 FROM python:3.12-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
 WORKDIR /app
 
-# Copy only dependency files first for better build caching
-COPY pyproject.toml /app/
+# 1) Install shared libs (editable) — copy project root + package dir
+COPY libs/pyproject.toml /tmp/libs/pyproject.toml
+COPY libs /tmp/libs/libs
+RUN pip install --no-cache-dir -e /tmp/libs
 
-# Install pip-tools to handle pyproject.toml
-RUN pip install --no-cache-dir pip-tools
+# (optional) sanity check
+RUN python - <<'PY'
+import importlib
+m = importlib.import_module("libs.raina_common.events")
+print("OK:", m.__file__)
+PY
 
-# Compile and install dependencies
+# 2) Install service deps (from service pyproject)
+COPY services/artifact-service/pyproject.toml /app/pyproject.toml
 RUN pip install --no-cache-dir .
 
-# Now copy the actual application code
-COPY app /app/app
+# 3) Copy the service code
+COPY services/artifact-service/app /app/app
 
-ENV PYTHONUNBUFFERED=1
+# 4) Run
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8011"]

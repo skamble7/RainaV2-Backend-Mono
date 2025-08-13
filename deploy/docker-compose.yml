@@ -10,7 +10,9 @@ services:
       RABBITMQ_DEFAULT_PASS: raina
 
   workspace-service:
-    build: ../services/workspace-service
+    build:
+      context: ..                               # <- repo root
+      dockerfile: services/workspace-service/Dockerfile
     env_file:
       - ../services/workspace-service/.env.example
     environment:
@@ -26,7 +28,8 @@ services:
 
   artifact-service:
     build:
-      context: ../services/artifact-service
+      context: ..                               # <- repo root
+      dockerfile: services/artifact-service/Dockerfile
     container_name: artifact-service
     environment:
       MONGO_URI: mongodb+srv://sandeepk:sandeep@cluster0.tnbpi.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0
@@ -40,7 +43,8 @@ services:
 
   capability-registry:
     build:
-      context: ../services/capability-registry
+      context: ..                               # <- repo root
+      dockerfile: services/capability-registry/Dockerfile
     environment:
       MONGO_URI: mongodb+srv://sandeepk:sandeep@cluster0.tnbpi.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0
       MONGO_DB: RainaV2
@@ -53,7 +57,8 @@ services:
 
   discovery-service:
     build:
-      context: ../services/discovery-service
+      context: ..                               # <- repo root
+      dockerfile: services/discovery-service/Dockerfile
     env_file:
       - ../services/discovery-service/.env.example
     environment:
@@ -69,7 +74,8 @@ services:
 
   guidance-service:
     build:
-      context: ../services/guidance-service
+      context: ..                               # <- repo root
+      dockerfile: services/guidance-service/Dockerfile
     container_name: guidance-service
     env_file:
       - ../services/guidance-service/.env.example   # <- matches your structure
@@ -88,7 +94,8 @@ services:
 
   notification-service:
     build:
-      context: ../services/notification-service
+      context: ..                               # <- repo root
+      dockerfile: services/notification-service/Dockerfile
     environment:
       RABBITMQ_URL: amqp://raina:raina@rabbitmq:5672/
       RABBITMQ_EXCHANGE: raina.events

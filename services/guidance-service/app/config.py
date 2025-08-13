@@ -1,7 +1,7 @@
 # app/config.py
 from typing import Optional, List
 from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict  # <-- new
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     SERVICE_NAME: str = "guidance-service"
@@ -9,7 +9,11 @@ class Settings(BaseSettings):
 
     # External services
     ARTIFACT_SERVICE_URL: str = "http://artifact-service:8011"
+
+    # Messaging
     RABBITMQ_URL: str = "amqp://guest:guest@rabbitmq:5672/%2F"
+    RABBITMQ_EXCHANGE: str = "raina.events"            # topic exchange
+    EVENTS_ORG: str = "raina"                          # org/tenant segment for versioned keys
 
     # LLM config
     LLM_PROVIDER: str = "openai"
@@ -33,7 +37,6 @@ class Settings(BaseSettings):
     # Filesystem
     OUTPUT_DIR: str = "/output"
 
-    # pydantic v2 settings config (replaces v1 'class Config')
     model_config = SettingsConfigDict(env_file=".env", case_sensitive=False)
 
 settings = Settings()

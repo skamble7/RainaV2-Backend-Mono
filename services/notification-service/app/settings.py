@@ -1,15 +1,22 @@
+# app/settings.py
 from pydantic_settings import BaseSettings
+from typing import List
 
 class Settings(BaseSettings):
+    # Service
     SERVICE_NAME: str = "notification-service"
     ENV: str = "dev"
 
-    # RabbitMQ
+    # RabbitMQ (topic exchange)
     RABBITMQ_URL: str = "amqp://guest:guest@rabbitmq:5672/"
     RABBITMQ_EXCHANGE: str = "raina.events"
     RABBITMQ_EXCHANGE_TYPE: str = "topic"
+
+    # Durable queue for this service (survives restarts)
     RABBITMQ_QUEUE: str = "notification-service.v1"
-    RABBITMQ_BINDINGS: list[str] = [
+
+    # Bind ONLY to versioned keys: <org>.<service>.<event>.v1
+    RABBITMQ_BINDINGS: List[str] = [
         "*.workspace.*.v1",
         "*.artifact.*.v1",
         "*.discovery.*.v1",
@@ -21,10 +28,10 @@ class Settings(BaseSettings):
     ]
 
     # WebSocket
-    WS_PATH: str = "/ws"  # connect to /ws?tenant_id=...&workspace_id=...
-    WS_ALLOW_ORIGINS: list[str] = ["*"]  # tighten in prod
+    WS_PATH: str = "/ws"                 # e.g., ws://host:port/ws
+    WS_ALLOW_ORIGINS: List[str] = ["*"]  # tighten in prod if needed
 
-    # Replay buffer
+    # Optional replay buffer per workspace (not implemented in this snippet)
     BUFFER_SIZE_PER_WORKSPACE: int = 200
 
     class Config:

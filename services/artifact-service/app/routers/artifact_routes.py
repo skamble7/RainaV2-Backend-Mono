@@ -1,4 +1,4 @@
-# app/routers/artifact_routes.py
+# services/artifact-service/app/routers/artifact_routes.py
 from __future__ import annotations
 
 from copy import deepcopy
@@ -10,8 +10,9 @@ from fastapi import APIRouter, HTTPException, Header, Query, Response, status
 from fastapi.responses import ORJSONResponse
 from pymongo.errors import DuplicateKeyError  # motor/pymongo duplicate key
 
+from ..config import settings
 from ..db.mongodb import get_db
-from ..events.rabbit import publish_event
+from ..events.rabbit import publish_event_v1
 from ..dal import artifact_dal as dal
 from ..models.artifact import (
     ArtifactItemCreate,
@@ -19,6 +20,7 @@ from ..models.artifact import (
     ArtifactItemPatchIn,
     WorkspaceArtifactsDoc,
 )
+from libs.raina_common.events import Service  # versioned routing (service segment)
 
 # --- Reserved key protection for logger.extra (quick fix) ---------------
 _RESERVED = {
@@ -69,6 +71,11 @@ def _set_event_header(response: Response, published: bool) -> None:
     response.headers["X-Event-Published"] = "true" if published else "false"
 
 
+# Convenience: org segment for routing keys
+def _org() -> str:
+    return settings.events_org  # default "raina"
+
+
 # ─────────────────────────────────────────────────────────────
 # Create embedded artifact under a workspace parent
 # ─────────────────────────────────────────────────────────────
@@ -83,7 +90,7 @@ async def create_artifact(
     Idempotent create:
     - If artifact (kind+name) already exists, return 200 with the existing item (no 409).
     - On race DuplicateKeyError, fetch and return the existing item with 200.
-    - Publishes 'artifact.created' only on the first successful insert.
+    - Publishes 'raina.artifact.created.v1' only on the first successful insert.
     """
     db = await get_db()
 
@@ -127,7 +134,12 @@ async def create_artifact(
     # Only publish 'created' when we truly created it
     published = True
     if created:
-        published = publish_event("artifact.created", art.model_dump())
+        published = publish_event_v1(
+            org=_org(),
+            service=Service.ARTIFACT,
+            event="created",
+            payload=art.model_dump(),
+        )
         if not published:
             logger.error(
                 "Event publish failed (create not blocked)",
@@ -144,7 +156,6 @@ async def create_artifact(
     else:
         response.headers["X-Idempotent-Replay"] = "true"
         return ORJSONResponse(art.model_dump(), status_code=status.HTTP_200_OK)
-
 
 
 # ─────────────────────────────────────────────────────────────
@@ -239,7 +250,12 @@ async def replace_artifact(
 
     updated = await dal.replace_artifact(db, workspace_id, artifact_id, body.data, body.provenance)
 
-    published = publish_event("artifact.updated", updated.model_dump())
+    published = publish_event_v1(
+        org=_org(),
+        service=Service.ARTIFACT,
+        event="updated",
+        payload=updated.model_dump(),
+    )
     if not published:
         logger.error(
             "Event publish failed (replace not blocked)",
@@ -282,6 +298,7 @@ async def patch_artifact(
     from_version = art.version
     updated = await dal.replace_artifact(db, workspace_id, artifact_id, new_data, body.provenance)
 
+    # record patch history
     await dal.record_patch(
         db,
         workspace_id=workspace_id,
@@ -292,9 +309,11 @@ async def patch_artifact(
         prov=body.provenance,
     )
 
-    published = publish_event(
-        "artifact.patched",
-        {
+    published = publish_event_v1(
+        org=_org(),
+        service=Service.ARTIFACT,
+        event="patched",
+        payload={
             "artifact": updated.model_dump(),
             "from_version": from_version,
             "to_version": updated.version,
@@ -339,7 +358,12 @@ async def delete_artifact(workspace_id: str, artifact_id: str, response: Respons
     if not deleted:
         raise HTTPException(status_code=404, detail="Not found or already deleted")
 
-    published = publish_event("artifact.deleted", {"_id": artifact_id, "workspace_id": workspace_id})
+    published = publish_event_v1(
+        org=_org(),
+        service=Service.ARTIFACT,
+        event="deleted",
+        payload={"_id": artifact_id, "workspace_id": workspace_id},
+    )
     if not published:
         logger.error(
             "Event publish failed (delete not blocked)",
