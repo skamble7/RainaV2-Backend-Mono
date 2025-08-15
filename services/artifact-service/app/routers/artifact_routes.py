@@ -1,14 +1,13 @@
-# services/artifact-service/app/routers/artifact_routes.py
 from __future__ import annotations
 
 from copy import deepcopy
 import logging
-from typing import Optional
+from typing import Optional, List, Dict, Any
 
 import jsonpatch
 from fastapi import APIRouter, HTTPException, Header, Query, Response, status
 from fastapi.responses import ORJSONResponse
-from pymongo.errors import DuplicateKeyError  # motor/pymongo duplicate key
+from pydantic import BaseModel  # ← must be imported before defining Pydantic models
 
 from ..config import settings
 from ..db.mongodb import get_db
@@ -19,23 +18,22 @@ from ..models.artifact import (
     ArtifactItemReplace,
     ArtifactItemPatchIn,
     WorkspaceArtifactsDoc,
+    ArtifactItem,
 )
 from libs.raina_common.events import Service  # versioned routing (service segment)
 
-# --- Reserved key protection for logger.extra (quick fix) ---------------
+# ─────────────────────────────────────────────────────────────
+# Logging utils
+# ─────────────────────────────────────────────────────────────
 _RESERVED = {
     "name", "msg", "args", "levelname", "levelno", "pathname", "filename", "module",
     "exc_info", "exc_text", "stack_info", "lineno", "funcName", "created", "msecs",
     "relativeCreated", "thread", "threadName", "process", "processName", "message", "asctime"
 }
-
 def safe_extra(extra: dict) -> dict:
     out = {}
     for k, v in extra.items():
-        if k in _RESERVED:
-            out[f"ctx_{k}"] = v  # rename to avoid LogRecord collisions
-        else:
-            out[k] = v
+        out[f"ctx_{k}" if k in _RESERVED else k] = v
     return out
 
 logger = logging.getLogger("app.routes.artifact")
@@ -46,116 +44,106 @@ router = APIRouter(
     default_response_class=ORJSONResponse,
 )
 
-# ─────────────────────────────────────────────────────────────
-# Helpers
-# ─────────────────────────────────────────────────────────────
-def _parse_if_match(value: Optional[str]) -> Optional[int]:
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="If-Match must be an integer version")
-
-
-def _guard_if_match(expected: Optional[int], actual: int) -> None:
-    if expected is not None and expected != actual:
-        raise HTTPException(
-            status_code=412,
-            detail=f"Precondition Failed: expected version {expected}, actual {actual}",
-        )
-
-
 def _set_event_header(response: Response, published: bool) -> None:
-    # Non-breaking way to expose publish outcome
     response.headers["X-Event-Published"] = "true" if published else "false"
 
-
-# Convenience: org segment for routing keys
 def _org() -> str:
     return settings.events_org  # default "raina"
 
-
 # ─────────────────────────────────────────────────────────────
-# Create embedded artifact under a workspace parent
+# Create/Upsert single artifact (versioned + lineage)
 # ─────────────────────────────────────────────────────────────
-@router.post("/{workspace_id}", status_code=status.HTTP_201_CREATED)
-async def create_artifact(
+@router.post("/{workspace_id}")
+async def upsert_artifact(
     workspace_id: str,
     body: ArtifactItemCreate,
     response: Response,
-    idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
+    run_id: Optional[str] = Header(default=None, alias="X-Run-Id"),
 ):
     """
-    Idempotent create:
-    - If artifact (kind+name) already exists, return 200 with the existing item (no 409).
-    - On race DuplicateKeyError, fetch and return the existing item with 200.
-    - Publishes 'raina.artifact.created.v1' only on the first successful insert.
+    Versioned upsert by natural_key (fallback=kind:name) + fingerprint.
+    Returns the final artifact plus an 'op' header: insert|update|noop.
     """
     db = await get_db()
 
-    # Fast path: if already exists, return it (idempotent)
-    existing = await dal.get_artifact_by_name(db, workspace_id, body.kind, body.name)
-    if existing:
-        logger.info(
-            "Artifact create idempotent replay (precheck hit)",
-            extra=safe_extra({
-                "workspace_id": workspace_id,
-                "kind": body.kind,
-                "artifact_name": body.name,
-                "idempotency_key": idempotency_key,
-            }),
-        )
-        response.headers["ETag"] = str(existing.version)
-        response.headers["X-Idempotent-Replay"] = "true"
-        return ORJSONResponse(existing.model_dump(), status_code=status.HTTP_200_OK)
-
-    # Try to insert
     try:
-        art = await dal.add_artifact(db, workspace_id, body, body.provenance)
-        created = True
-    except DuplicateKeyError:
-        # Another request won the race; fetch and return it
-        logger.info(
-            "Artifact create idempotent replay (race)",
-            extra=safe_extra({
-                "workspace_id": workspace_id,
-                "kind": body.kind,
-                "artifact_name": body.name,
-                "idempotency_key": idempotency_key,
-            }),
+        art, op = await dal.upsert_artifact(
+            db=db,
+            workspace_id=workspace_id,
+            payload=body,
+            prov=body.provenance,
+            run_id=run_id,
         )
-        art = await dal.get_artifact_by_name(db, workspace_id, body.kind, body.name)
-        if not art:
-            # extremely rare: index not visible yet; fall back to 409 to avoid lying
-            raise HTTPException(status_code=409, detail="Artifact with same kind+name exists")
-        created = False
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.exception("upsert_artifact_failed", extra=safe_extra({"workspace_id": workspace_id, "err": str(e)}))
+        raise HTTPException(status_code=500, detail="Artifact upsert failed")
 
-    # Only publish 'created' when we truly created it
+    # Events: created only on insert; updated on update; noop = no event
     published = True
-    if created:
-        published = publish_event_v1(
-            org=_org(),
-            service=Service.ARTIFACT,
-            event="created",
-            payload=art.model_dump(),
-        )
-        if not published:
-            logger.error(
-                "Event publish failed (create not blocked)",
-                extra=safe_extra({
-                    "workspace_id": workspace_id,
-                    "artifact_id": art.id,
-                }),
-            )
+    if op == "insert":
+        published = publish_event_v1(org=_org(), service=Service.ARTIFACT, event="created", payload=art.model_dump())
+    elif op == "update":
+        published = publish_event_v1(org=_org(), service=Service.ARTIFACT, event="updated", payload=art.model_dump())
 
     response.headers["ETag"] = str(art.version)
+    response.headers["X-Op"] = op
     _set_event_header(response, published)
-    if created:
-        return ORJSONResponse(art.model_dump(), status_code=status.HTTP_201_CREATED)
-    else:
-        response.headers["X-Idempotent-Replay"] = "true"
-        return ORJSONResponse(art.model_dump(), status_code=status.HTTP_200_OK)
+
+    # 201 for insert, 200 otherwise
+    status_code = status.HTTP_201_CREATED if op == "insert" else status.HTTP_200_OK
+    return ORJSONResponse(art.model_dump(), status_code=status_code)
+
+
+# ─────────────────────────────────────────────────────────────
+# Batch upsert
+# ─────────────────────────────────────────────────────────────
+class BatchItems(BaseModel):
+    items: List[ArtifactItemCreate]
+
+@router.post("/{workspace_id}/upsert-batch")
+async def upsert_batch(
+    workspace_id: str,
+    payload: BatchItems,
+    response: Response,
+    run_id: Optional[str] = Header(default=None, alias="X-Run-Id"),
+):
+    """
+    Upsert many artifacts in a single call.
+    Returns counts and per-item ops for UI diffing.
+    """
+    db = await get_db()
+    results: List[Dict[str, Any]] = []
+    counts = {"insert": 0, "update": 0, "noop": 0, "failed": 0}
+
+    for item in payload.items:
+        try:
+            art, op = await dal.upsert_artifact(db, workspace_id, item, item.provenance, run_id=run_id)
+            if op in counts:
+                counts[op] += 1
+            results.append({
+                "artifact_id": art.artifact_id,
+                "natural_key": art.natural_key,
+                "op": op,
+                "version": art.version
+            })
+            # emit per-item event (same semantics as single upsert)
+            if op == "insert":
+                publish_event_v1(org=_org(), service=Service.ARTIFACT, event="created", payload=art.model_dump())
+            elif op == "update":
+                publish_event_v1(org=_org(), service=Service.ARTIFACT, event="updated", payload=art.model_dump())
+        except Exception as e:
+            logger.exception("batch_upsert_failed_item", extra=safe_extra({"workspace_id": workspace_id, "err": str(e)}))
+            counts["failed"] += 1
+            results.append({"error": str(e)})
+
+    summary = {"counts": counts, "results": results}
+    response.headers["X-Batch-Inserted"] = str(counts["insert"])
+    response.headers["X-Batch-Updated"] = str(counts["update"])
+    response.headers["X-Batch-Noop"] = str(counts["noop"])
+    response.headers["X-Batch-Failed"] = str(counts["failed"])
+    return summary
 
 
 # ─────────────────────────────────────────────────────────────
@@ -184,7 +172,7 @@ async def list_artifacts(
 
 
 # ─────────────────────────────────────────────────────────────
-# Parent doc (workspace + all artifacts)
+# Parent doc (workspace + all artifacts; includes baseline inputs)
 # ─────────────────────────────────────────────────────────────
 @router.get("/{workspace_id}/parent", response_model=WorkspaceArtifactsDoc)
 async def get_workspace_with_artifacts(
@@ -204,7 +192,7 @@ async def get_workspace_with_artifacts(
 
 
 # ─────────────────────────────────────────────────────────────
-# Read (sets ETag)
+# Read / HEAD
 # ─────────────────────────────────────────────────────────────
 @router.get("/{workspace_id}/{artifact_id}")
 async def get_artifact(workspace_id: str, artifact_id: str, response: Response):
@@ -215,10 +203,6 @@ async def get_artifact(workspace_id: str, artifact_id: str, response: Response):
     response.headers["ETag"] = str(art.version)
     return art
 
-
-# ─────────────────────────────────────────────────────────────
-# HEAD – lightweight change check via ETag only
-# ─────────────────────────────────────────────────────────────
 @router.head("/{workspace_id}/{artifact_id}")
 async def head_artifact(workspace_id: str, artifact_id: str, response: Response):
     db = await get_db()
@@ -230,8 +214,23 @@ async def head_artifact(workspace_id: str, artifact_id: str, response: Response)
 
 
 # ─────────────────────────────────────────────────────────────
-# Replace (optimistic concurrency via If-Match)
+# Replace / Patch / History / Delete
 # ─────────────────────────────────────────────────────────────
+def _parse_if_match(value: Optional[str]) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="If-Match must be an integer version")
+
+def _guard_if_match(expected: Optional[int], actual: int) -> None:
+    if expected is not None and expected != actual:
+        raise HTTPException(
+            status_code=412,
+            detail=f"Precondition Failed: expected version {expected}, actual {actual}",
+        )
+
 @router.put("/{workspace_id}/{artifact_id}")
 async def replace_artifact(
     workspace_id: str,
@@ -250,30 +249,14 @@ async def replace_artifact(
 
     updated = await dal.replace_artifact(db, workspace_id, artifact_id, body.data, body.provenance)
 
-    published = publish_event_v1(
-        org=_org(),
-        service=Service.ARTIFACT,
-        event="updated",
-        payload=updated.model_dump(),
-    )
+    published = publish_event_v1(org=_org(), service=Service.ARTIFACT, event="updated", payload=updated.model_dump())
     if not published:
-        logger.error(
-            "Event publish failed (replace not blocked)",
-            extra=safe_extra({
-                "workspace_id": workspace_id,
-                "artifact_id": artifact_id,
-                "to_version": updated.version,
-            }),
-        )
+        logger.error("Event publish failed (replace)", extra=safe_extra({"workspace_id": workspace_id, "artifact_id": artifact_id}))
 
     response.headers["ETag"] = str(updated.version)
     _set_event_header(response, published)
     return updated
 
-
-# ─────────────────────────────────────────────────────────────
-# Patch (optimistic concurrency via If-Match)
-# ─────────────────────────────────────────────────────────────
 @router.post("/{workspace_id}/{artifact_id}/patch")
 async def patch_artifact(
     workspace_id: str,
@@ -297,8 +280,6 @@ async def patch_artifact(
 
     from_version = art.version
     updated = await dal.replace_artifact(db, workspace_id, artifact_id, new_data, body.provenance)
-
-    # record patch history
     await dal.record_patch(
         db,
         workspace_id=workspace_id,
@@ -310,35 +291,21 @@ async def patch_artifact(
     )
 
     published = publish_event_v1(
-        org=_org(),
-        service=Service.ARTIFACT,
-        event="patched",
+        org=_org(), service=Service.ARTIFACT, event="patched",
         payload={
             "artifact": updated.model_dump(),
             "from_version": from_version,
             "to_version": updated.version,
-            "patch": body.patch,
-        },
+            "patch": body.patch
+        }
     )
     if not published:
-        logger.error(
-            "Event publish failed (patch not blocked)",
-            extra=safe_extra({
-                "workspace_id": workspace_id,
-                "artifact_id": artifact_id,
-                "from_version": from_version,
-                "to_version": updated.version,
-            }),
-        )
+        logger.error("Event publish failed (patch)", extra=safe_extra({"workspace_id": workspace_id, "artifact_id": artifact_id}))
 
     response.headers["ETag"] = str(updated.version)
     _set_event_header(response, published)
     return updated
 
-
-# ─────────────────────────────────────────────────────────────
-# History
-# ─────────────────────────────────────────────────────────────
 @router.get("/{workspace_id}/{artifact_id}/history")
 async def history(workspace_id: str, artifact_id: str):
     db = await get_db()
@@ -347,10 +314,6 @@ async def history(workspace_id: str, artifact_id: str):
         raise HTTPException(status_code=404, detail="Not found")
     return await dal.list_patches(db, workspace_id, artifact_id)
 
-
-# ─────────────────────────────────────────────────────────────
-# Soft delete
-# ─────────────────────────────────────────────────────────────
 @router.delete("/{workspace_id}/{artifact_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_artifact(workspace_id: str, artifact_id: str, response: Response):
     db = await get_db()
@@ -359,19 +322,11 @@ async def delete_artifact(workspace_id: str, artifact_id: str, response: Respons
         raise HTTPException(status_code=404, detail="Not found or already deleted")
 
     published = publish_event_v1(
-        org=_org(),
-        service=Service.ARTIFACT,
-        event="deleted",
+        org=_org(), service=Service.ARTIFACT, event="deleted",
         payload={"_id": artifact_id, "workspace_id": workspace_id},
     )
     if not published:
-        logger.error(
-            "Event publish failed (delete not blocked)",
-            extra=safe_extra({
-                "workspace_id": workspace_id,
-                "artifact_id": artifact_id,
-            }),
-        )
+        logger.error("Event publish failed (delete)", extra=safe_extra({"workspace_id": workspace_id, "artifact_id": artifact_id}))
 
     _set_event_header(response, published)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

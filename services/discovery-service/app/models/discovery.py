@@ -1,10 +1,12 @@
-# app/models/discovery.py
 from __future__ import annotations
-from typing import List, Dict, Optional, Any
-from pydantic import BaseModel, Field, UUID4
-from datetime import datetime
 
-# ---------- AVC ----------
+from datetime import datetime
+from typing import Any, Dict, List, Literal, Optional
+from pydantic import BaseModel, Field, UUID4
+
+# ─────────────────────────────────────────────────────────────
+# Inputs (AVC / FSS / PSS)
+# ─────────────────────────────────────────────────────────────
 class AVCGoal(BaseModel):
     id: str
     text: str
@@ -32,24 +34,21 @@ class AVC(BaseModel):
     context: AVCContext = Field(default_factory=AVCContext)
     success_criteria: List[AVCSuccessCriterion] = []
 
-# ---------- FSS ----------
 class FSSStory(BaseModel):
     key: str
     title: str
     description: str
     acceptance_criteria: List[str] = []
-    tags: List[str] = []  # e.g. ["domain:payments","capability:reporting"]
+    tags: List[str] = []  # e.g., ["domain:auth","capability:batch-orchestration"]
 
 class FSS(BaseModel):
     stories: List[FSSStory] = []
 
-# ---------- PSS ----------
 class PSS(BaseModel):
     paradigm: str
     style: List[str] = []
     tech_stack: List[str] = []
 
-# ---------- Request wrapper ----------
 class DiscoveryInputs(BaseModel):
     avc: AVC
     fss: FSS
@@ -68,14 +67,61 @@ class StartDiscoveryRequest(BaseModel):
     inputs: DiscoveryInputs
     options: Optional[DiscoveryOptions] = None
 
-# ---------- Persistence shape ----------
+# ─────────────────────────────────────────────────────────────
+# Diffs & summaries
+# ─────────────────────────────────────────────────────────────
+class AVCDiff(BaseModel):
+    added_goals: List[str] = []
+    removed_goals: List[str] = []
+    updated_goals: List[Dict[str, Any]] = []   # { id, fields:[...] }
+    added_vision: List[str] = []
+    removed_vision: List[str] = []
+    added_nfrs: List[str] = []
+    removed_nfrs: List[str] = []
+
+class FSSDiff(BaseModel):
+    added_keys: List[str] = []
+    removed_keys: List[str] = []
+    updated: List[Dict[str, Any]] = []         # { key, fields:[...] }
+
+class PSSDiff(BaseModel):
+    paradigm_changed: bool = False
+    style_added: List[str] = []
+    style_removed: List[str] = []
+    tech_added: List[str] = []
+    tech_removed: List[str] = []
+
+class InputsDiff(BaseModel):
+    avc: AVCDiff = Field(default_factory=AVCDiff)
+    fss: FSSDiff = Field(default_factory=FSSDiff)
+    pss: PSSDiff = Field(default_factory=PSSDiff)
+
+class ArtifactsDiff(BaseModel):
+    new: List[str] = []        # artifact_ids
+    updated: List[str] = []
+    unchanged: List[str] = []
+    retired: List[str] = []
+
+# ─────────────────────────────────────────────────────────────
+# Run persistence shape
+# ─────────────────────────────────────────────────────────────
 class DiscoveryRun(BaseModel):
-    discovery_run_id: UUID4
+    run_id: UUID4
+
     workspace_id: UUID4
     playbook_id: str
     inputs: DiscoveryInputs
     options: DiscoveryOptions = Field(default_factory=DiscoveryOptions)
-    status: str = "created"  # created|running|completed|failed
+
+    # Inputs identity & comparison vs workspace baseline
+    input_fingerprint: Optional[str] = None       # sha256 over canonical(inputs)
+    input_diff: Optional[InputsDiff] = None
+
+    # Run intent + artifact summary
+    strategy: Literal["baseline", "delta", "rebuild"] = "delta"
+    artifacts_diff: Optional[ArtifactsDiff] = None
+
+    status: Literal["created", "running", "completed", "failed", "aborted"] = "created"
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     result_summary: Optional[Dict[str, Any]] = None

@@ -1,6 +1,11 @@
-import httpx
+# app/clients/artifact_service.py
+from __future__ import annotations
+
 import uuid
-from typing import Optional
+from typing import Optional, List, Dict, Any
+
+import httpx
+
 from app.config import settings
 
 # Pull IDs from middleware if present (falls back to fresh UUIDs)
@@ -11,6 +16,11 @@ except Exception:  # pragma: no cover
 
 
 def _corr_headers(extra: Optional[dict] = None) -> dict:
+    """
+    Standard outbound headers:
+      - x-request-id / x-correlation-id (propagated or fresh)
+      - plus any extras (e.g., {"X-Run-Id": "..."}).
+    """
     rid = None
     cid = None
     try:
@@ -31,12 +41,60 @@ def _corr_headers(extra: Optional[dict] = None) -> dict:
     return base
 
 
-async def create_artifact(workspace_id: str, artifact: dict, *, idempotency_key: Optional[str] = None) -> dict:
-    headers = _corr_headers({"idempotency-key": idempotency_key} if idempotency_key else None)
+# ─────────────────────────────────────────────────────────────
+# New preferred endpoints (versioned upsert semantics)
+# ─────────────────────────────────────────────────────────────
+async def upsert_single(workspace_id: str, item: Dict[str, Any], *, run_id: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Versioned upsert of a single artifact.
+    Returns the artifact JSON; server sets X-Op header (insert|update|noop).
+    """
+    headers = _corr_headers({"X-Run-Id": run_id} if run_id else None)
+    url = f"{settings.ARTIFACT_SERVICE_URL}/artifact/{workspace_id}"
     async with httpx.AsyncClient(timeout=settings.REQUEST_TIMEOUT_S, headers=headers) as client:
-        r = await client.post(f"{settings.ARTIFACT_SERVICE_URL}/artifact/{workspace_id}", json=artifact)
+        r = await client.post(url, json=item)
         if r.is_error:
-            # Return rich error so caller can log status/message
+            raise httpx.HTTPStatusError(f"{r.status_code}: {r.text}", request=r.request, response=r)
+        return r.json()
+
+
+async def upsert_batch(workspace_id: str, items: List[Dict[str, Any]], *, run_id: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Batch versioned upsert.
+    Returns:
+      {
+        "counts": {"insert": n, "update": n, "noop": n, "failed": n},
+        "results": [
+          {"artifact_id": "...", "natural_key": "...", "op": "insert|update|noop", "version": 1} | {"error": "..."},
+          ...
+        ]
+      }
+    """
+    headers = _corr_headers({"X-Run-Id": run_id} if run_id else None)
+    url = f"{settings.ARTIFACT_SERVICE_URL}/artifact/{workspace_id}/upsert-batch"
+    payload = {"items": items}
+    async with httpx.AsyncClient(timeout=settings.REQUEST_TIMEOUT_S, headers=headers) as client:
+        r = await client.post(url, json=payload)
+        if r.is_error:
+            raise httpx.HTTPStatusError(f"{r.status_code}: {r.text}", request=r.request, response=r)
+        return r.json()
+
+
+# ─────────────────────────────────────────────────────────────
+# Legacy helpers (kept for convenience; now map to upsert)
+# ─────────────────────────────────────────────────────────────
+async def create_artifact(workspace_id: str, artifact: dict, *, idempotency_key: Optional[str] = None) -> dict:
+    """
+    Backward-compatible helper.
+    Uses the single upsert endpoint; ignores idempotency_key (fingerprint handles noops).
+    """
+    headers = _corr_headers()
+    if idempotency_key:
+        headers["idempotency-key"] = idempotency_key
+    url = f"{settings.ARTIFACT_SERVICE_URL}/artifact/{workspace_id}"
+    async with httpx.AsyncClient(timeout=settings.REQUEST_TIMEOUT_S, headers=headers) as client:
+        r = await client.post(url, json=artifact)
+        if r.is_error:
             raise httpx.HTTPStatusError(f"{r.status_code}: {r.text}", request=r.request, response=r)
         return r.json()
 

@@ -1,67 +1,61 @@
+# services/artifact-service/app/events/workspace_consumer.py
 from __future__ import annotations
 
-import asyncio
-import json
-import logging
+import asyncio, json, logging
 from motor.motor_asyncio import AsyncIOMotorDatabase
 import aio_pika
 
 from ..config import settings
 from ..dal import artifact_dal as dal
 from ..models.artifact import WorkspaceSnapshot
-
-# Common event RK builder
-from libs.raina_common.events import rk, Service, Version
+from libs.raina_common.events import rk, Service
 
 log = logging.getLogger("app.events.workspace_consumer")
 
-# Build the three routing keys we care about (created/updated/deleted)
 _RK_CREATED = rk(settings.events_org, Service.WORKSPACE, "created")
 _RK_UPDATED = rk(settings.events_org, Service.WORKSPACE, "updated")
 _RK_DELETED = rk(settings.events_org, Service.WORKSPACE, "deleted")
 
+def _normalize(payload: dict) -> dict:
+    """
+    Accepts:
+      - {"workspace": {...}}
+      - {"data": {...}, "meta": {...}}   ← your current shape
+      - flat {...}
+    Ensures '_id' is present (backfills from 'id' when needed).
+    """
+    data = payload.get("workspace") or payload.get("data") or payload or {}
+    wid = data.get("_id") or data.get("id")
+    if not wid:
+        raise ValueError(f"workspace payload missing id/_id: {payload}")
+    if "_id" not in data:
+        data = {**data, "_id": wid}
+    return data
 
 async def _handle_message_created(db: AsyncIOMotorDatabase, payload: dict) -> None:
-    data = payload.get("workspace", payload)
-    if "_id" not in data and "id" in data:
-        data = {**data, "_id": data["id"]}
+    data = _normalize(payload)
     ws = WorkspaceSnapshot.model_validate(data)
-
-    # Idempotent parent creation
-    if await dal.get_parent_doc(db, ws.id):
+    # idempotent
+    if await dal.get_parent_doc(db, ws.id):                          # <- was ws._id
         log.info("Parent already exists for workspace_id=%s", ws.id)
         return
-
     created = await dal.create_parent_doc(db, ws)
     log.info("Created WorkspaceArtifactsDoc: workspace_id=%s, doc_id=%s", ws.id, created.id)
 
-
 async def _handle_message_updated(db: AsyncIOMotorDatabase, payload: dict) -> None:
-    data = payload.get("workspace", payload)
-    if "_id" not in data and "id" in data:
-        data = {**data, "_id": data["id"]}
+    data = _normalize(payload)
     ws = WorkspaceSnapshot.model_validate(data)
     await dal.refresh_workspace_snapshot(db, ws)
     log.info("Refreshed workspace snapshot for workspace_id=%s", ws.id)
 
-
 async def _handle_message_deleted(db: AsyncIOMotorDatabase, payload: dict) -> None:
-    data = payload.get("workspace", payload)
-    wid = data.get("_id") or data.get("id")
-    if not wid:
-        log.error("workspace.deleted payload missing id/_id: %s", payload)
-        return
+    data = _normalize(payload)
+    wid = data["_id"]
     ok = await dal.delete_parent_doc(db, wid)
     log.info("Deleted parent doc for workspace_id=%s (ok=%s)", wid, ok)
 
-
 async def run_workspace_created_consumer(db: AsyncIOMotorDatabase, shutdown_event: asyncio.Event) -> None:
-    """
-    Long-running consumer for workspace lifecycle events.
-    Reconnects on failure. Stops when shutdown_event is set.
-    """
-    queue_name = settings.consumer_queue_workspace  # durable named queue by default (can be "" for anonymous)
-
+    queue_name = settings.consumer_queue_workspace
     while not shutdown_event.is_set():
         try:
             log.info("Connecting to RabbitMQ at %s ...", settings.rabbitmq_uri)
@@ -73,14 +67,9 @@ async def run_workspace_created_consumer(db: AsyncIOMotorDatabase, shutdown_even
                 exchange = await channel.declare_exchange(
                     settings.rabbitmq_exchange, aio_pika.ExchangeType.TOPIC, durable=True
                 )
-
                 queue = await channel.declare_queue(
-                    queue_name or "",  # empty => anonymous auto-delete queue
-                    durable=True if queue_name else False,
-                    auto_delete=False if queue_name else True,
+                    queue_name or "", durable=bool(queue_name), auto_delete=not bool(queue_name)
                 )
-
-                # Bind to the three versioned keys
                 await queue.bind(exchange, routing_key=_RK_CREATED)
                 await queue.bind(exchange, routing_key=_RK_UPDATED)
                 await queue.bind(exchange, routing_key=_RK_DELETED)
@@ -97,24 +86,27 @@ async def run_workspace_created_consumer(db: AsyncIOMotorDatabase, shutdown_even
                         async with message.process(requeue=False):
                             try:
                                 payload = json.loads(message.body.decode("utf-8"))
-                            except Exception as e:
-                                log.exception("Invalid JSON: %s", e)
+                                _ = _normalize(payload)  # validate early
+                            except Exception:
+                                log.exception("Invalid workspace message; dropping")
                                 continue
 
-                            rk_in = message.routing_key
-                            if rk_in == _RK_CREATED:
-                                await _handle_message_created(db, payload)
-                            elif rk_in == _RK_UPDATED:
-                                await _handle_message_updated(db, payload)
-                            elif rk_in == _RK_DELETED:
-                                await _handle_message_deleted(db, payload)
-                            else:
-                                log.warning("Unhandled routing key: %s", rk_in)
+                            try:
+                                if message.routing_key == _RK_CREATED:
+                                    await _handle_message_created(db, payload)
+                                elif message.routing_key == _RK_UPDATED:
+                                    await _handle_message_updated(db, payload)
+                                elif message.routing_key == _RK_DELETED:
+                                    await _handle_message_deleted(db, payload)
+                                else:
+                                    log.warning("Unhandled routing key: %s", message.routing_key)
+                            except Exception:
+                                log.exception("Handler error (rk=%s); continuing", message.routing_key)
 
         except asyncio.CancelledError:
             break
-        except Exception as e:
-            log.exception("workspace consumer error; retrying in 3s: %s", e)
+        except Exception:
+            log.exception("workspace consumer error; retrying in 3s")
             await asyncio.sleep(3.0)
 
     log.info("workspace consumer stopped")
