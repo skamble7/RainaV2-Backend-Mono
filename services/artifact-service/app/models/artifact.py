@@ -1,3 +1,4 @@
+# app/models/artifact.py
 from __future__ import annotations
 
 from datetime import datetime
@@ -95,6 +96,7 @@ class WorkspaceArtifactsDoc(BaseModel):
 
     # Baseline inputs (latest approved)
     inputs_baseline: Dict[str, Any] = Field(default_factory=dict)     # { avc, fss, pss }
+    inputs_baseline_fingerprint: Optional[str] = None                 # ← NEW: sha256 over canonical(inputs_baseline)
     inputs_baseline_version: int = 1
     last_promoted_run_id: Optional[str] = None
 

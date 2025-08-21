@@ -1,3 +1,4 @@
+# app/routes/artifact_routes.py
 from __future__ import annotations
 
 from copy import deepcopy
@@ -144,6 +145,119 @@ async def upsert_batch(
     response.headers["X-Batch-Noop"] = str(counts["noop"])
     response.headers["X-Batch-Failed"] = str(counts["failed"])
     return summary
+
+
+# ─────────────────────────────────────────────────────────────
+# Baseline inputs (NEW)
+# ─────────────────────────────────────────────────────────────
+class InputsBaselineIn(BaseModel):
+    avc: Dict[str, Any]
+    fss: Dict[str, Any]
+    pss: Dict[str, Any]
+
+class InputsBaselinePatch(BaseModel):
+    avc: Optional[Dict[str, Any]] = None
+    pss: Optional[Dict[str, Any]] = None
+    fss_stories_upsert: Optional[List[Dict[str, Any]]] = None
+
+@router.post("/{workspace_id}/baseline-inputs")
+async def set_baseline_inputs(
+    workspace_id: str,
+    body: InputsBaselineIn,
+    response: Response,
+    if_absent_only: bool = Query(default=False),
+    expected_version: Optional[int] = Query(default=None, ge=1),
+):
+    """
+    Set/replace the entire baseline inputs for a workspace.
+    - if_absent_only: only set if currently empty (first capture)
+    - expected_version: optional optimistic check on inputs_baseline_version
+    """
+    db = await get_db()
+    try:
+        parent, op = await dal.set_inputs_baseline(
+            db=db,
+            workspace_id=workspace_id,
+            new_inputs=body.model_dump(),
+            if_absent_only=if_absent_only,
+            expected_version=expected_version,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=412, detail=str(e))
+    except Exception as e:
+        logger.exception("set_baseline_inputs_failed", extra=safe_extra({"workspace_id": workspace_id, "err": str(e)}))
+        raise HTTPException(status_code=500, detail="Failed to set baseline inputs")
+
+    published = True
+    if op == "insert":
+        published = publish_event_v1(
+            org=_org(), service=Service.ARTIFACT, event="baseline_inputs.set",
+            payload={
+                "workspace_id": workspace_id,
+                "version": parent.inputs_baseline_version,
+                "fingerprint": parent.inputs_baseline_fingerprint,
+                "op": op,
+            },
+        )
+    elif op == "replace":
+        published = publish_event_v1(
+            org=_org(), service=Service.ARTIFACT, event="baseline_inputs.replaced",
+            payload={
+                "workspace_id": workspace_id,
+                "version": parent.inputs_baseline_version,
+                "fingerprint": parent.inputs_baseline_fingerprint,
+                "op": op,
+            },
+        )
+
+    _set_event_header(response, published)
+    response.headers["X-Op"] = op
+    response.headers["X-Baseline-Version"] = str(parent.inputs_baseline_version)
+    return parent.model_dump()
+
+
+@router.patch("/{workspace_id}/baseline-inputs")
+async def patch_baseline_inputs(
+    workspace_id: str,
+    body: InputsBaselinePatch,
+    response: Response,
+    expected_version: Optional[int] = Query(default=None, ge=1),
+):
+    """
+    Merge semantics:
+      - Replace AVC or PSS wholesale if present.
+      - Upsert into FSS stories by 'key' if fss_stories_upsert provided.
+    """
+    db = await get_db()
+    try:
+        updated = await dal.merge_inputs_baseline(
+            db=db,
+            workspace_id=workspace_id,
+            avc=body.avc,
+            pss=body.pss,
+            fss_stories_upsert=body.fss_stories_upsert,
+            expected_version=expected_version,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=412, detail=str(e))
+    except Exception as e:
+        logger.exception("patch_baseline_inputs_failed", extra=safe_extra({"workspace_id": workspace_id, "err": str(e)}))
+        raise HTTPException(status_code=500, detail="Failed to patch baseline inputs")
+
+    published = publish_event_v1(
+        org=_org(), service=Service.ARTIFACT, event="baseline_inputs.merged",
+        payload={
+            "workspace_id": workspace_id,
+            "version": updated.inputs_baseline_version,
+            "fingerprint": updated.inputs_baseline_fingerprint,
+            "upserts": len(body.fss_stories_upsert or []),
+            "replaced_avc": body.avc is not None,
+            "replaced_pss": body.pss is not None,
+        },
+    )
+    _set_event_header(response, published)
+    response.headers["X-Baseline-Version"] = str(updated.inputs_baseline_version)
+    return updated.model_dump()
 
 
 # ─────────────────────────────────────────────────────────────

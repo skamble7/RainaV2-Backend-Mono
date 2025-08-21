@@ -104,3 +104,56 @@ async def head_artifact(workspace_id: str, artifact_id: str) -> str | None:
     async with httpx.AsyncClient(timeout=settings.REQUEST_TIMEOUT_S, headers=headers) as client:
         r = await client.head(f"{settings.ARTIFACT_SERVICE_URL}/artifact/{workspace_id}/{artifact_id}")
         return r.headers.get("ETag")
+
+
+# ─────────────────────────────────────────────────────────────
+# Baseline inputs (NEW)
+# ─────────────────────────────────────────────────────────────
+async def set_inputs_baseline(
+    workspace_id: str,
+    inputs: Dict[str, Any],
+    *,
+    run_id: Optional[str] = None,
+    if_absent_only: bool = False,
+    expected_version: Optional[int] = None,
+) -> Dict[str, Any]:
+    headers = _corr_headers({"X-Run-Id": run_id} if run_id else None)
+    q = []
+    if if_absent_only:
+        q.append("if_absent_only=true")
+    if expected_version is not None:
+        q.append(f"expected_version={expected_version}")
+    qs = ("?" + "&".join(q)) if q else ""
+    url = f"{settings.ARTIFACT_SERVICE_URL}/artifact/{workspace_id}/baseline-inputs{qs}"
+    async with httpx.AsyncClient(timeout=settings.REQUEST_TIMEOUT_S, headers=headers) as client:
+        r = await client.post(url, json=inputs)
+        if r.is_error:
+            raise httpx.HTTPStatusError(f"{r.status_code}: {r.text}", request=r.request, response=r)
+        return r.json()
+
+
+async def patch_inputs_baseline(
+    workspace_id: str,
+    *,
+    avc: Optional[Dict[str, Any]] = None,
+    pss: Optional[Dict[str, Any]] = None,
+    fss_stories_upsert: Optional[List[Dict[str, Any]]] = None,
+    run_id: Optional[str] = None,
+    expected_version: Optional[int] = None,
+) -> Dict[str, Any]:
+    headers = _corr_headers({"X-Run-Id": run_id} if run_id else None)
+    q = []
+    if expected_version is not None:
+        q.append(f"expected_version={expected_version}")
+    qs = ("?" + "&".join(q)) if q else ""
+    url = f"{settings.ARTIFACT_SERVICE_URL}/artifact/{workspace_id}/baseline-inputs{qs}"
+    payload = {
+        "avc": avc,
+        "pss": pss,
+        "fss_stories_upsert": fss_stories_upsert,
+    }
+    async with httpx.AsyncClient(timeout=settings.REQUEST_TIMEOUT_S, headers=headers) as client:
+        r = await client.patch(url, json=payload)
+        if r.is_error:
+            raise httpx.HTTPStatusError(f"{r.status_code}: {r.text}", request=r.request, response=r)
+        return r.json()

@@ -1,3 +1,4 @@
+# app/main.py
 from __future__ import annotations
 
 import json
@@ -29,6 +30,9 @@ from app.db.discovery_runs import (
     set_status,
 )
 
+# NEW: baseline inputs capture
+from app.clients.artifact_service import set_inputs_baseline
+
 # --- Correlation middleware & logging filter ----------------------------
 from app.middleware.correlation import (
     CorrelationIdMiddleware,
@@ -37,7 +41,6 @@ from app.middleware.correlation import (
     correlation_id_var,
 )
 
-# ---------------- logging helpers ----------------
 _RESERVED = {
     "name","msg","args","levelname","levelno","pathname","filename","module",
     "exc_info","exc_text","stack_info","lineno","funcName","created","msecs",
@@ -166,13 +169,9 @@ def _inputs_diff(baseline: Dict[str, Any], candidate: Dict[str, Any]) -> InputsD
     return InputsDiff(avc=avc_diff, fss=fss_diff, pss=pss_diff)
 
 async def _fetch_workspace_baseline_inputs(workspace_id: str) -> Dict[str, Any]:
-    """
-    Pull baseline inputs from artifact-service /artifact/{workspace_id}/parent
-    """
     async with httpx.AsyncClient(timeout=settings.REQUEST_TIMEOUT_S, headers=_corr_headers()) as client:
         r = await client.get(f"{settings.ARTIFACT_SERVICE_URL}/artifact/{workspace_id}/parent")
         if r.status_code == 404:
-            # No parent exists yet → treat as empty baseline
             return {}
         r.raise_for_status()
         parent = r.json()
@@ -204,11 +203,24 @@ async def _run_discovery(req: StartDiscoveryRequest, run_id: UUID4):
         },
     }
 
+    # NEW: Capture initial baseline inputs in artifact-service if absent
+    try:
+        await set_inputs_baseline(
+            workspace_id=str(req.workspace_id),
+            inputs=req.inputs.model_dump(),
+            run_id=str(run_id),
+            if_absent_only=True,     # do not override an existing baseline
+        )
+    except Exception as e:
+        # Non-fatal: log & continue so discovery still runs
+        state.setdefault("logs", []).append(f"inputs_baseline capture skipped: {e}")
+
     try:
         set_status(db, run_id, "running")
     except Exception:
         logger.exception("Failed to set run status to running", extra=safe_extra({"run_id": str(run_id)}))
 
+    # Include title/description in the STARTED event if present
     publish_event_v1(
         org=settings.EVENTS_ORG,
         event="started",
@@ -218,6 +230,8 @@ async def _run_discovery(req: StartDiscoveryRequest, run_id: UUID4):
             "playbook_id": req.playbook_id,
             "model_id": model_id,
             "received_at": start_ts.isoformat(),
+            "title": getattr(req, "title", None),
+            "description": getattr(req, "description", None),
         },
         headers=_corr_headers(),
     )
@@ -235,6 +249,9 @@ async def _run_discovery(req: StartDiscoveryRequest, run_id: UUID4):
             "started_at": start_ts.isoformat(),
             "completed_at": completed_at.isoformat(),
             "duration_s": (completed_at - start_ts).total_seconds(),
+            # Echo title/description for consumers that want it later
+            "title": getattr(req, "title", None),
+            "description": getattr(req, "description", None),
         }
 
         set_status(db, run_id, "completed", result_summary=summary, result_artifacts_ref=None)
@@ -252,6 +269,8 @@ async def _run_discovery(req: StartDiscoveryRequest, run_id: UUID4):
             "artifact_failures": state.get("context", {}).get("artifact_failures", []),
             "started_at": start_ts.isoformat(),
             "failed_at": datetime.now(timezone.utc).isoformat(),
+            "title": getattr(req, "title", None),
+            "description": getattr(req, "description", None),
         }
         try:
             set_status(get_db(), run_id, "failed", error=str(e))
@@ -266,7 +285,6 @@ async def discover(workspace_id: str, req: StartDiscoveryRequest, bg: Background
     if str(req.workspace_id) != workspace_id:
         raise HTTPException(status_code=400, detail="workspace_id in path and body must match")
 
-    # Compute fingerprint & diff against current baseline inputs
     baseline_inputs = await _fetch_workspace_baseline_inputs(workspace_id)
     candidate_inputs = req.inputs.model_dump()
     input_fingerprint = _sha256(_canonical(candidate_inputs))
@@ -291,6 +309,8 @@ async def discover(workspace_id: str, req: StartDiscoveryRequest, bg: Background
         "playbook_id": req.playbook_id,
         "model_id": (req.options.model if req.options else None) or settings.MODEL_ID,
         "dry_run": bool(req.options and req.options.dry_run),
+        "title": getattr(req, "title", None),
+        "description": getattr(req, "description", None),
         "request_id": request_id_var.get(),
         "correlation_id": correlation_id_var.get(),
         "message": "Discovery started; query status with GET /runs/{run_id} or list via GET /runs?workspace_id=...",

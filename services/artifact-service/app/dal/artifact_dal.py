@@ -1,10 +1,11 @@
+# app/dal/artifact_dal.py
 from __future__ import annotations
 
 import json
 import uuid
 import hashlib
 from datetime import datetime
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Dict, Any, Tuple, Iterable
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo import ASCENDING, DESCENDING
@@ -35,7 +36,7 @@ def _sha256(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
 def _fallback_natural_key(kind: str, name: str) -> str:
-    """If caller didn't compute per‑kind natural key, fall back to kind+name."""
+    """If caller didn't compute per-kind natural key, fall back to kind+name."""
     return f"{kind}:{name}".lower().strip()
 
 
@@ -57,6 +58,7 @@ async def ensure_indexes(db: AsyncIOMotorDatabase):
 
     # Baseline inputs and metadata (useful filters)
     await col.create_index([("inputs_baseline_version", DESCENDING)])
+    await col.create_index([("inputs_baseline_fingerprint", ASCENDING)])  # ← NEW
     await col.create_index([("last_promoted_run_id", ASCENDING)])
 
     # Patch history
@@ -77,11 +79,13 @@ async def create_parent_doc(
     last_promoted_run_id: Optional[str] = None,
 ) -> WorkspaceArtifactsDoc:
     now = datetime.utcnow()
+    fp = _sha256(_canonical(inputs_baseline)) if inputs_baseline else None
     doc = {
         "_id": str(uuid.uuid4()),
         "workspace_id": workspace.id,                           # <- was workspace._id
         "workspace": workspace.model_dump(by_alias=True),       # <- ensure _id stored
         "inputs_baseline": inputs_baseline or {},
+        "inputs_baseline_fingerprint": fp,                      # ← NEW
         "inputs_baseline_version": inputs_baseline_version,
         "last_promoted_run_id": last_promoted_run_id,
         "artifacts": [],
@@ -118,6 +122,135 @@ async def refresh_workspace_snapshot(db, workspace: WorkspaceSnapshot) -> bool:
 async def delete_parent_doc(db, workspace_id: str) -> bool:
     res = await db[WORKSPACE_ARTIFACTS].delete_one({"workspace_id": workspace_id})
     return res.deleted_count == 1
+
+
+# ─────────────────────────────────────────────────────────────
+# Baseline inputs (new)
+# ─────────────────────────────────────────────────────────────
+def _upsert_fss_stories(existing_stories: List[Dict[str, Any]], to_upsert: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    index = {s.get("key"): i for i, s in enumerate(existing_stories) if isinstance(s, dict) and s.get("key")}
+    result = list(existing_stories)
+    for s in to_upsert:
+        k = s.get("key")
+        if not k:
+            continue
+        if k in index:
+            result[index[k]] = s  # replace whole story by key
+        else:
+            result.append(s)      # append new
+    return result
+
+
+async def set_inputs_baseline(
+    db: AsyncIOMotorDatabase,
+    workspace_id: str,
+    new_inputs: Dict[str, Any],
+    *,
+    if_absent_only: bool = False,
+    expected_version: Optional[int] = None,
+) -> Tuple[WorkspaceArtifactsDoc, str]:
+    """
+    Set/replace the entire inputs_baseline.
+    Returns: (updated_parent_doc, op) where op ∈ {"insert","replace","noop"}
+    - insert: baseline was empty, now set (version stays 1)
+    - replace: baseline existed and was replaced (version += 1)
+    - noop: if_absent_only=True and baseline already existed
+    """
+    now = datetime.utcnow()
+    parent = await get_parent_doc(db, workspace_id)
+    if not parent:
+        raise ValueError(f"Workspace parent not found for {workspace_id}")
+
+    existed = bool(parent.inputs_baseline)
+    if if_absent_only and existed:
+        return parent, "noop"
+
+    if expected_version is not None and parent.inputs_baseline_version != expected_version:
+        raise ValueError(
+            f"Precondition Failed: expected baseline version {expected_version}, "
+            f"actual {parent.inputs_baseline_version}"
+        )
+
+    fp = _sha256(_canonical(new_inputs))
+
+    res = await db[WORKSPACE_ARTIFACTS].find_one_and_update(
+        {"workspace_id": workspace_id},
+        {
+            "$set": {
+                "inputs_baseline": new_inputs,
+                "inputs_baseline_fingerprint": fp,
+                "updated_at": now,
+            },
+            "$inc": {"inputs_baseline_version": 1 if existed else 0},
+        },
+        return_document=True,
+    )
+    return WorkspaceArtifactsDoc(**res), ("replace" if existed else "insert")
+
+
+async def merge_inputs_baseline(
+    db: AsyncIOMotorDatabase,
+    workspace_id: str,
+    *,
+    avc: Optional[Dict[str, Any]] = None,
+    pss: Optional[Dict[str, Any]] = None,
+    fss_stories_upsert: Optional[List[Dict[str, Any]]] = None,
+    expected_version: Optional[int] = None,
+) -> WorkspaceArtifactsDoc:
+    """
+    Partial baseline merge:
+      - avc: replace whole AVC if provided
+      - pss: replace whole PSS if provided
+      - fss_stories_upsert: upsert by story.key into baseline.fss.stories
+    Always bumps inputs_baseline_version by 1 when any change is applied.
+    """
+    now = datetime.utcnow()
+    parent = await get_parent_doc(db, workspace_id)
+    if not parent:
+        raise ValueError(f"Workspace parent not found for {workspace_id}")
+
+    if expected_version is not None and parent.inputs_baseline_version != expected_version:
+        raise ValueError(
+            f"Precondition Failed: expected baseline version {expected_version}, "
+            f"actual {parent.inputs_baseline_version}"
+        )
+
+    base = parent.inputs_baseline or {}
+    changed = False
+
+    if avc is not None:
+        base["avc"] = avc
+        changed = True
+    if pss is not None:
+        base["pss"] = pss
+        changed = True
+    if fss_stories_upsert:
+        fss = base.get("fss") or {}
+        stories = fss.get("stories") or []
+        merged = _upsert_fss_stories(stories, fss_stories_upsert)
+        if merged != stories:
+            fss["stories"] = merged
+            base["fss"] = fss
+            changed = True
+
+    if not changed:
+        return parent  # no-op
+
+    fp = _sha256(_canonical(base))
+
+    res = await db[WORKSPACE_ARTIFACTS].find_one_and_update(
+        {"workspace_id": workspace_id},
+        {
+            "$set": {
+                "inputs_baseline": base,
+                "inputs_baseline_fingerprint": fp,
+                "updated_at": now,
+            },
+            "$inc": {"inputs_baseline_version": 1},
+        },
+        return_document=True,
+    )
+    return WorkspaceArtifactsDoc(**res)
 
 
 # ─────────────────────────────────────────────────────────────

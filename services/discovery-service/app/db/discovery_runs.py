@@ -40,6 +40,10 @@ def create_discovery_run(
         playbook_id=req.playbook_id,
         inputs=req.inputs,
         options=req.options or {},
+        # NEW: persist friendly metadata
+        title=getattr(req, "title", None),
+        description=getattr(req, "description", None),
+        # Identity & diff
         input_fingerprint=input_fingerprint,
         input_diff=input_diff,
         strategy=strategy,  # baseline|delta|rebuild

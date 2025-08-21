@@ -1,3 +1,4 @@
+# app/models/discovery.py
 from __future__ import annotations
 
 from datetime import datetime
@@ -67,6 +68,10 @@ class StartDiscoveryRequest(BaseModel):
     inputs: DiscoveryInputs
     options: Optional[DiscoveryOptions] = None
 
+    # NEW: optional friendly metadata for the run
+    title: Optional[str] = Field(default=None, max_length=200)
+    description: Optional[str] = Field(default=None, max_length=2000)
+
 # ─────────────────────────────────────────────────────────────
 # Diffs & summaries
 # ─────────────────────────────────────────────────────────────
@@ -112,6 +117,10 @@ class DiscoveryRun(BaseModel):
     playbook_id: str
     inputs: DiscoveryInputs
     options: DiscoveryOptions = Field(default_factory=DiscoveryOptions)
+
+    # NEW: friendly metadata for the run (non-mandatory)
+    title: Optional[str] = Field(default=None, max_length=200)
+    description: Optional[str] = Field(default=None, max_length=2000)
 
     # Inputs identity & comparison vs workspace baseline
     input_fingerprint: Optional[str] = None       # sha256 over canonical(inputs)
