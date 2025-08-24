@@ -15,9 +15,13 @@ class Settings(BaseSettings):
     PACK_KEY: str = "svc-micro"
     PACK_VERSION: str = "v1"
 
-    # Messaging
+    # Messaging (topic exchange)
     RABBITMQ_URI: str
     RABBITMQ_EXCHANGE: str = "raina.events"
+
+    # Events: org/tenant segment for versioned routing keys
+    # Final RK shape => <EVENTS_ORG>.<service>.<event>.v1
+    EVENTS_ORG: str = "raina"
 
     # LLM Config
     MODEL_ID: str = "openai:gpt-4o-mini"

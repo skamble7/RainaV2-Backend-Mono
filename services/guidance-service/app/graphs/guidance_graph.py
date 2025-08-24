@@ -1,14 +1,18 @@
+# app/graphs/guidance_graph.py
 import time
 from typing import List, Dict, Any
 from app.models.state import GuidanceState
 from app.models.schemas import GuidanceDocument, GuidanceSection
 from app.clients.artifact_client import ArtifactClient
 from app.agents.guidance_agent import run_agent
-from app.infra.rabbit import RabbitPublisher
 from app.infra.pdf import markdown_to_pdf
 from app.infra.storage import pdf_path_for
 from app.config import settings
 from app.models.events import GuidanceGeneratedEvent
+
+# ⬇️ NEW: use the versioned publisher
+from app.infra.rabbit import publish_event_v1
+
 
 def _parse_markdown_to_struct(md: str, sections: List[str]) -> GuidanceDocument:
     # Very light structuring: split by headers; in practice you'd use
@@ -23,6 +27,7 @@ def _parse_markdown_to_struct(md: str, sections: List[str]) -> GuidanceDocument:
     )
     return doc
 
+
 async def run_guidance_pipeline(
     workspace_id: str,
     artifact_kinds: List[str] | None,
@@ -34,7 +39,6 @@ async def run_guidance_pipeline(
 ):
     t0 = time.time()
     ac = ArtifactClient()
-    pub = RabbitPublisher()
 
     # 1) fetch artifacts
     artifacts = await ac.fetch_cam_artifacts(workspace_id, artifact_kinds)
@@ -67,7 +71,7 @@ async def run_guidance_pipeline(
             markdown_to_pdf(md, out)
             pdf_path = str(out)
 
-        # 5) publish event
+        # 5) publish event (VERSIONED: <org>.guidance.generated.v1)
         evt = GuidanceGeneratedEvent(
             document_artifact_id=artifact_id,
             workspace_id=workspace_id,
@@ -76,7 +80,13 @@ async def run_guidance_pipeline(
             duration_ms=int((time.time()-t0)*1000),
             meta={"sections": sections}
         ).dict()
-        await pub.publish("guidance.generated", evt)
+
+        # emits: f"{settings.EVENTS_ORG}.guidance.generated.v1"  (defaults to "raina.guidance.generated.v1")
+        await publish_event_v1(
+            event="generated",
+            org=getattr(settings, "EVENTS_ORG", "raina"),
+            payload=evt,
+        )
 
     return {
         "document": doc,

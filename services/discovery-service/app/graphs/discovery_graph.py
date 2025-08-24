@@ -3,7 +3,7 @@ from typing import Callable
 from app.models.state import DiscoveryState
 from app.agents.ingest_node import ingest_node
 from app.agents.plan_node import plan_node
-from app.agents.generate_node import generate_node
+from app.agents.pipeline.generate_node import generate_node
 from app.agents.validate_node import validate_node
 from app.agents.persist_node import persist_node
 from app.agents.publish_node import publish_node
