@@ -1,4 +1,3 @@
-# app/routes/artifact_routes.py
 from __future__ import annotations
 
 from copy import deepcopy
@@ -303,6 +302,32 @@ async def get_workspace_with_artifacts(
 
     filtered = [a for a in doc.artifacts if a.deleted_at is None]
     return doc.model_copy(update={"artifacts": filtered}, deep=True)
+
+
+# ─────────────────────────────────────────────────────────────
+# Run deltas (NEW)
+# ─────────────────────────────────────────────────────────────
+@router.get("/{workspace_id}/deltas")
+async def run_deltas(
+    workspace_id: str,
+    run_id: str = Query(..., description="Discovery run id to compute deltas for"),
+    include_ids: bool = Query(default=False, description="Include grouped artifact ids"),
+):
+    """
+    Compute per-run deltas by scanning embedded artifacts:
+      - new: lineage.first_seen_run_id == run_id
+      - updated: provenance.run_id == run_id and not new
+      - unchanged: lineage.last_seen_run_id == run_id and not (new|updated) and not deleted
+      - retired: seen previously but not seen in this run (last_seen_run_id != run_id) and not deleted
+      - deleted: deleted_at != None
+    """
+    db = await get_db()
+    parent = await dal.get_parent_doc(db, workspace_id)
+    if not parent:
+        raise HTTPException(status_code=404, detail="Workspace parent not found")
+
+    out = dal.compute_run_deltas(parent, run_id=run_id, include_ids=include_ids)
+    return out
 
 
 # ─────────────────────────────────────────────────────────────

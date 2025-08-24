@@ -1,4 +1,3 @@
-# app/dal/artifact_dal.py
 from __future__ import annotations
 
 import json
@@ -528,3 +527,76 @@ async def list_patches(
 ) -> List[Dict[str, Any]]:
     cur = db[PATCHES].find({"workspace_id": workspace_id, "artifact_id": artifact_id}).sort("to_version", 1)
     return [d async for d in cur]
+
+
+# ─────────────────────────────────────────────────────────────
+# Run delta computation (NEW)
+# ─────────────────────────────────────────────────────────────
+def _prov_run_id(prov: Optional[Provenance | Dict[str, Any]]) -> Optional[str]:
+    """
+    Safely extract run_id from provenance whether it's a Pydantic model,
+    a plain dict, or None.
+    """
+    if prov is None:
+        return None
+    # Pydantic model (Preferred)
+    if hasattr(prov, "run_id"):
+        try:
+            return getattr(prov, "run_id")
+        except Exception:
+            pass
+    # Fallback: dict (legacy stored shape)
+    if isinstance(prov, dict):
+        return prov.get("run_id")
+    return None
+
+
+def compute_run_deltas(
+    parent: WorkspaceArtifactsDoc,
+    *,
+    run_id: str,
+    include_ids: bool = False,
+) -> Dict[str, Any]:
+    """
+    Compute per-run deltas by scanning embedded artifacts:
+      - new: lineage.first_seen_run_id == run_id
+      - updated: provenance.run_id == run_id and not new
+      - unchanged: lineage.last_seen_run_id == run_id and not (new|updated) and not deleted
+      - retired: seen previously but not seen in this run (last_seen_run_id != run_id) and not deleted
+      - deleted: deleted_at != None
+    """
+    buckets = {
+        "new": [],
+        "updated": [],
+        "unchanged": [],
+        "retired": [],
+        "deleted": [],
+    }
+
+    for a in parent.artifacts:
+        # Deleted always counts as deleted, regardless of run linkage
+        if getattr(a, "deleted_at", None) is not None:
+            buckets["deleted"].append(a.artifact_id)
+            continue
+
+        first_seen = getattr(a.lineage, "first_seen_run_id", None) if a.lineage else None
+        last_seen = getattr(a.lineage, "last_seen_run_id", None) if a.lineage else None
+        prov_run = _prov_run_id(a.provenance)
+
+        if first_seen == run_id:
+            buckets["new"].append(a.artifact_id)
+        elif prov_run == run_id:
+            # changed during this run
+            buckets["updated"].append(a.artifact_id)
+        elif last_seen == run_id:
+            # observed this run but not changed/new
+            buckets["unchanged"].append(a.artifact_id)
+        else:
+            # existed prior, not deleted, and not seen in this run
+            buckets["retired"].append(a.artifact_id)
+
+    counts = {k: len(v) for k, v in buckets.items()}
+    out: Dict[str, Any] = {"counts": counts}
+    if include_ids:
+        out["ids"] = buckets
+    return out

@@ -1,4 +1,3 @@
-# app/models/discovery.py
 from __future__ import annotations
 
 from datetime import datetime
@@ -38,7 +37,7 @@ class AVC(BaseModel):
 class FSSStory(BaseModel):
     key: str
     title: str
-    description: str
+    description: List[str] | str | None = None  # allow flexibility
     acceptance_criteria: List[str] = []
     tags: List[str] = []  # e.g., ["domain:auth","capability:batch-orchestration"]
 
@@ -102,10 +101,21 @@ class InputsDiff(BaseModel):
     pss: PSSDiff = Field(default_factory=PSSDiff)
 
 class ArtifactsDiff(BaseModel):
-    new: List[str] = []        # artifact_ids
+    """
+    Diff result by natural key (not IDs), for easier UI grouping:
+      - new: present in run, not in baseline
+      - updated: present in both, but different artifact instance (id/fingerprint)
+      - unchanged: present in both, same artifact instance
+      - retired: present in baseline, not in run
+    """
+    new: List[str] = []
     updated: List[str] = []
     unchanged: List[str] = []
     retired: List[str] = []
+    counts: Dict[str, int] = Field(default_factory=dict)
+
+class RunDeltas(BaseModel):
+    counts: Dict[str, int] = Field(default_factory=dict)
 
 # ─────────────────────────────────────────────────────────────
 # Run persistence shape
@@ -129,6 +139,7 @@ class DiscoveryRun(BaseModel):
     # Run intent + artifact summary
     strategy: Literal["baseline", "delta", "rebuild"] = "delta"
     artifacts_diff: Optional[ArtifactsDiff] = None
+    deltas: Optional[RunDeltas] = None
 
     status: Literal["created", "running", "completed", "failed", "aborted"] = "created"
     created_at: datetime = Field(default_factory=datetime.utcnow)
