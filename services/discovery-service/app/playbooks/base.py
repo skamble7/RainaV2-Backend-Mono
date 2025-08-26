@@ -1,3 +1,4 @@
+# services/discovery-service/app/playbooks/base.py
 from typing import Protocol
 
 class PlaybookResolver(Protocol):

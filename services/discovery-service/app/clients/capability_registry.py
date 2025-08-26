@@ -1,3 +1,5 @@
+# services/discovery-service/app/clients/capability_registry.py
+
 import httpx
 import uuid
 from typing import Optional

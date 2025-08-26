@@ -1,4 +1,6 @@
 # app/agents/registry.py
+# Maps capability_id -> agent instance and provides a single helper for lookups.
+
 from __future__ import annotations
 from typing import Dict, Optional
 
@@ -15,7 +17,7 @@ from app.agents.micro.deployment_topology import DeploymentTopologyAgent
 from app.agents.micro.authz_policies import AuthzPoliciesAgent
 from app.agents.micro.app_workflows import AppWorkflowsAgent
 
-# Map capability_id -> agent instance
+# capability_id → concrete agent instance
 _REGISTRY: Dict[str, RainaAgent] = {
     # Core discovery
     "cap.discover.context_map": ContextMapAgent(),
@@ -34,4 +36,9 @@ _REGISTRY: Dict[str, RainaAgent] = {
 }
 
 def agent_for_capability(capability_id: str) -> Optional[RainaAgent]:
+    """
+    Look up the agent instance for a given capability_id.
+    """
     return _REGISTRY.get((capability_id or "").strip())
+
+__all__ = ["agent_for_capability"]

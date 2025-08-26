@@ -1,4 +1,5 @@
 # app/pipeline/generate_node.py
+
 from __future__ import annotations
 from typing import Any, Dict
 from app.models.state import DiscoveryState
