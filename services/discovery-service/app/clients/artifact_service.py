@@ -1,4 +1,3 @@
-# app/clients/artifact_service.py
 from __future__ import annotations
 
 import uuid
@@ -45,10 +44,6 @@ def _corr_headers(extra: Optional[dict] = None) -> dict:
 # New preferred endpoints (versioned upsert semantics)
 # ─────────────────────────────────────────────────────────────
 async def upsert_single(workspace_id: str, item: Dict[str, Any], *, run_id: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Versioned upsert of a single artifact.
-    Returns the artifact JSON; server sets X-Op header (insert|update|noop).
-    """
     headers = _corr_headers({"X-Run-Id": run_id} if run_id else None)
     url = f"{settings.ARTIFACT_SERVICE_URL}/artifact/{workspace_id}"
     async with httpx.AsyncClient(timeout=settings.REQUEST_TIMEOUT_S, headers=headers) as client:
@@ -59,17 +54,6 @@ async def upsert_single(workspace_id: str, item: Dict[str, Any], *, run_id: Opti
 
 
 async def upsert_batch(workspace_id: str, items: List[Dict[str, Any]], *, run_id: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Batch versioned upsert.
-    Returns:
-      {
-        "counts": {"insert": n, "update": n, "noop": n, "failed": n},
-        "results": [
-          {"artifact_id": "...", "natural_key": "...", "op": "insert|update|noop", "version": 1} | {"error": "..."},
-          ...
-        ]
-      }
-    """
     headers = _corr_headers({"X-Run-Id": run_id} if run_id else None)
     url = f"{settings.ARTIFACT_SERVICE_URL}/artifact/{workspace_id}/upsert-batch"
     payload = {"items": items}
@@ -84,10 +68,6 @@ async def upsert_batch(workspace_id: str, items: List[Dict[str, Any]], *, run_id
 # Legacy helpers (kept for convenience; now map to upsert)
 # ─────────────────────────────────────────────────────────────
 async def create_artifact(workspace_id: str, artifact: dict, *, idempotency_key: Optional[str] = None) -> dict:
-    """
-    Backward-compatible helper.
-    Uses the single upsert endpoint; ignores idempotency_key (fingerprint handles noops).
-    """
     headers = _corr_headers()
     if idempotency_key:
         headers["idempotency-key"] = idempotency_key
@@ -154,6 +134,68 @@ async def patch_inputs_baseline(
     }
     async with httpx.AsyncClient(timeout=settings.REQUEST_TIMEOUT_S, headers=headers) as client:
         r = await client.patch(url, json=payload)
+        if r.is_error:
+            raise httpx.HTTPStatusError(f"{r.status_code}: {r.text}", request=r.request, response=r)
+        return r.json()
+
+
+# ─────────────────────────────────────────────────────────────
+# Helpful getters we use for diffing
+# ─────────────────────────────────────────────────────────────
+async def get_workspace_parent(workspace_id: str) -> Dict[str, Any]:
+    """Fetches the parent/workspace doc (baseline inputs, last_promoted_run_id, etc.)."""
+    headers = _corr_headers()
+    url = f"{settings.ARTIFACT_SERVICE_URL}/artifact/{workspace_id}/parent"
+    async with httpx.AsyncClient(timeout=settings.REQUEST_TIMEOUT_S, headers=headers) as client:
+        r = await client.get(url)
+        if r.status_code == 404:
+            return {}
+        if r.is_error:
+            raise httpx.HTTPStatusError(f"{r.status_code}: {r.text}", request=r.request, response=r)
+        return r.json()
+
+
+async def get_artifact(workspace_id: str, artifact_id: str) -> Dict[str, Any]:
+    """Fetch a single artifact document (we need natural_key/kind/name/fingerprint)."""
+    headers = _corr_headers()
+    url = f"{settings.ARTIFACT_SERVICE_URL}/artifact/{workspace_id}/{artifact_id}"
+    async with httpx.AsyncClient(timeout=settings.REQUEST_TIMEOUT_S, headers=headers) as client:
+        r = await client.get(url)
+        if r.is_error:
+            raise httpx.HTTPStatusError(f"{r.status_code}: {r.text}", request=r.request, response=r)
+        return r.json()
+
+
+async def get_artifacts_by_ids(workspace_id: str, ids: List[str]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for a_id in ids:
+        try:
+            out.append(await get_artifact(workspace_id, a_id))
+        except Exception:
+            # best-effort: skip missing/broken ids
+            pass
+    return out
+
+
+# ─────────────────────────────────────────────────────────────
+# Run deltas (OPTIONAL; if you later add an endpoint server-side)
+# ─────────────────────────────────────────────────────────────
+async def get_run_deltas(
+    workspace_id: str,
+    run_id: str,
+    *,
+    include_ids: bool = False,
+) -> Dict[str, Any]:
+    """
+    Optional convenience wrapper if artifact-service exposes:
+      GET /artifact/{workspace_id}/deltas?run_id=...&include_ids=true|false
+    Not used by discovery flow (we compute diffs here), but kept for compatibility.
+    """
+    headers = _corr_headers()
+    qs = f"?run_id={run_id}&include_ids={'true' if include_ids else 'false'}"
+    url = f"{settings.ARTIFACT_SERVICE_URL}/artifact/{workspace_id}/deltas{qs}"
+    async with httpx.AsyncClient(timeout=settings.REQUEST_TIMEOUT_S, headers=headers) as client:
+        r = await client.get(url)
         if r.is_error:
             raise httpx.HTTPStatusError(f"{r.status_code}: {r.text}", request=r.request, response=r)
         return r.json()
