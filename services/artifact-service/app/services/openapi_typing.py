@@ -1,4 +1,3 @@
-# services/artifact-service/app/services/openapi_typing.py
 from __future__ import annotations
 
 import re
@@ -70,7 +69,7 @@ def _make_model(kind_id: str, version: str, data_schema: Dict[str, Any]) -> Type
       - kind: Literal[kind_id]
       - data: Dict[str, Any] (but OpenAPI overridden to `data_schema`)
     """
-    KindLiteralType = Literal[kind_id]  # <-- correct dynamic Literal construction
+    KindLiteralType = Literal[kind_id]  # dynamic Literal
 
     model = create_model(
         _safe_name(kind_id, version),
@@ -122,24 +121,8 @@ async def compile_discriminated_union(
         return None, [], {}
 
     # Build an Annotated[Union[...], Field(discriminator='kind')]
-    # Passing a tuple to Union[...] is valid for runtime construction.
     union = Annotated[Union[tuple(models)], Field(discriminator="kind")]  # type: ignore[arg-type]
     return union, models, version_map
-
-
-# ─────────────────────────────────────────────────────────────
-# Response wrapper models
-# ─────────────────────────────────────────────────────────────
-
-def make_list_response_model(union_type: type) -> Type[BaseModel]:
-    """
-    Build: { items: List[UnionType], count: int }
-    """
-    return create_model(
-        "ArtifactsListResponse",
-        items=(List[union_type], ...),  # type: ignore[arg-type]
-        count=(int, ...),
-    )
 
 
 # ─────────────────────────────────────────────────────────────
@@ -149,26 +132,26 @@ def make_list_response_model(union_type: type) -> Type[BaseModel]:
 def patch_routes_with_union(app: FastAPI, union_type: type) -> None:
     """
     Patch existing routes so their OpenAPI shows real shapes.
-      - GET /artifacts/{workspace_id} -> list wrapper
-      - GET /artifacts/{workspace_id}/{artifact_id} -> union_type
+      - GET /artifact/{workspace_id} -> List[UnionType]
+      - GET /artifact/{workspace_id}/{artifact_id} -> UnionType
     """
-    list_model = make_list_response_model(union_type)
+    from typing import List as _List  # avoid shadowing
 
     for route in app.routes:
         path = getattr(route, "path", "")
         methods = getattr(route, "methods", set())
 
-        if not path.startswith("/artifacts"):
+        if not path.startswith("/artifact"):
             continue
 
         # Single item
-        if path == "/artifacts/{workspace_id}/{artifact_id}" and "GET" in methods:
+        if path == "/artifact/{workspace_id}/{artifact_id}" and "GET" in methods:
             route.response_model = union_type  # type: ignore[attr-defined]
             route.response_model_include = None
             continue
 
         # List endpoint
-        if path == "/artifacts/{workspace_id}" and "GET" in methods:
-            route.response_model = list_model  # type: ignore[attr-defined]
+        if path == "/artifact/{workspace_id}" and "GET" in methods:
+            route.response_model = _List[union_type]  # type: ignore[attr-defined]
             route.response_model_include = None
             continue

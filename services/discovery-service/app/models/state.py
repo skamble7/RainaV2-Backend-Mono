@@ -1,3 +1,4 @@
+#services/discovery-service/app/models/state.py
 from typing import TypedDict, Any, List, Dict
 
 class DiscoveryState(TypedDict, total=False):

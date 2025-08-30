@@ -1,9 +1,7 @@
-# app/agents/pipeline/agent_runner.py
-# Executes planned steps and emits per-step events.
-# Resolves agents via capability_id using app.agents.registry.agent_for_capability.
-
+#services/discovery-service/app/agents/pipeline/agent_runner.py
 from __future__ import annotations
 
+import json
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -74,30 +72,79 @@ def _resolve_agent_for_capability(capability_id: str):
     return agent
 
 
-# ---- legacy → canonical mapping ----------------------------------------
-_ALIAS_TO_CANON = {
-    # diagrams
-    "cam.context_map": "cam.diagram.context",
-    "cam.erd": "cam.diagram.class",
-    "cam.sequence_diagram": "cam.diagram.sequence",
-    "cam.component_diagram": "cam.diagram.component",
-    "cam.deployment_topology": "cam.diagram.deployment",
-    # workflows / security / contracts
-    "cam.workflow": "cam.workflow.process",
-    "cam.security_policies": "cam.security.policy",
-    "cam.service_contract": "cam.contract.api",
-    "cam.events": "cam.contract.event",
-    # misc historical
-    "cam.adr_index": "cam.gov.adr.index",
-}
+# ---- helpers to merge artifacts safely ---------------------------------
+def _natural_key(a: Dict[str, Any]) -> str:
+    k = (a.get("kind") or "").strip().lower()
+    n = (a.get("name") or "").strip().lower()
+    return f"{k}:{n}" if k or n else ""
+
 
 def _canon_kind(k: Optional[str]) -> Optional[str]:
+    """
+    No legacy aliases anymore. Keep the incoming kind as-is (trimmed).
+    """
     if not k or not isinstance(k, str):
         return None
     k = k.strip()
-    if not k:
-        return None
-    return _ALIAS_TO_CANON.get(k, k)
+    return k or None
+
+
+def _coerce_artifact_list(val: Any, default_kind: Optional[str], step_id: Optional[str]) -> List[Dict[str, Any]]:
+    """
+    Accept:
+      - dict  -> [dict]
+      - list  -> list[dict] (ignore non-dicts)
+      - str   -> json.loads then recurse (if possible)
+      - other -> []
+    Fill in missing 'kind' with inferred default, inject _step_id for traceability.
+    """
+    items: List[Dict[str, Any]] = []
+
+    # If it's a JSON string, try parsing once
+    if isinstance(val, str):
+        try:
+            val = json.loads(val)
+        except Exception:
+            return items
+
+    if isinstance(val, dict):
+        items = [val]
+    elif isinstance(val, list):
+        items = [x for x in val if isinstance(x, dict)]
+    else:
+        return items
+
+    for it in items:
+        if default_kind and not it.get("kind"):
+            it["kind"] = default_kind
+        if step_id and "_step_id" not in it:
+            it["_step_id"] = step_id
+    return items
+
+
+def _merge_artifacts(state: DiscoveryState, incoming: List[Dict[str, Any]]) -> int:
+    """
+    Dedup by (kind,name) natural key; last write wins.
+    Returns number of items actually merged.
+    """
+    bucket = state.setdefault("artifacts", [])
+    # Build index of existing keys
+    idx = { _natural_key(a): i for i, a in enumerate(bucket) if isinstance(a, dict) }
+    merged = 0
+    for it in incoming:
+        if not isinstance(it, dict):
+            continue
+        nk = _natural_key(it)
+        if not nk:
+            # Skip malformed entries without kind/name
+            continue
+        if nk in idx:
+            bucket[idx[nk]] = it
+        else:
+            idx[nk] = len(bucket)
+            bucket.append(it)
+        merged += 1
+    return merged
 
 
 # ---- core runner --------------------------------------------------------
@@ -175,18 +222,19 @@ async def _run_single_step(state: DiscoveryState, step: dict) -> None:
 
         result = await agent.run(ctx_env, params)
 
-        # Merge results (patches → state["artifacts"])
+        merged_count = 0
         if result:
             patches = result.get("patches") or []
             if patches:
-                state.setdefault("artifacts", [])
                 for p in patches:
                     if p.get("op") == "upsert" and p.get("path") == "/artifacts":
-                        val = p.get("value")
-                        if isinstance(val, dict):
-                            state["artifacts"].append(val)
-                        elif isinstance(val, list):
-                            state["artifacts"].extend(val)
+                        coerced = _coerce_artifact_list(
+                            p.get("value"),
+                            default_kind=params.get("kind"),
+                            step_id=step_id,
+                        )
+                        if coerced:
+                            merged_count += _merge_artifacts(state, coerced)
 
             if result.get("telemetry"):
                 _ctx(state).setdefault("telemetry", []).extend(result["telemetry"])
@@ -194,6 +242,12 @@ async def _run_single_step(state: DiscoveryState, step: dict) -> None:
                 state.setdefault("adrs", []).extend(result["adrs"])
             if result.get("tasks"):
                 _ctx(state).setdefault("tasks", []).extend(result["tasks"])
+
+        # Debug: surface progress for persist_node
+        total_artifacts = len(state.get("artifacts") or [])
+        state.setdefault("logs", []).append(
+            f"Runner: step {step_id} merged {merged_count} items (total={total_artifacts})"
+        )
 
         t1 = time.perf_counter()
         done = {

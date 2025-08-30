@@ -1,3 +1,4 @@
+#services/artifact-service/app/routers/artifact_routes.py
 from __future__ import annotations
 
 from copy import deepcopy
@@ -21,6 +22,7 @@ from ..models.artifact import (
     ArtifactItem,
 )
 from libs.raina_common.events import Service  # versioned routing (service segment)
+from ..services.registry_service import KindRegistryService, SchemaValidationError
 
 # ─────────────────────────────────────────────────────────────
 # Logging utils
@@ -65,16 +67,35 @@ async def upsert_artifact(
     Returns the final artifact plus an 'op' header: insert|update|noop.
     """
     db = await get_db()
+    svc = KindRegistryService(db)
 
     try:
+        env = await svc.build_envelope(
+            kind_or_alias=body.kind,
+            name=body.name,
+            data=body.data,
+            supplied_schema_version=None,  # clients may send hints but we normalize anyway
+        )
+        payload = ArtifactItemCreate(
+            kind=env["kind"],
+            name=env["name"],
+            data=env["data"],
+            natural_key=env["natural_key"],
+            fingerprint=env["fingerprint"],
+            provenance=body.provenance,
+        )
         art, op = await dal.upsert_artifact(
             db=db,
             workspace_id=workspace_id,
-            payload=body,
+            payload=payload,
             prov=body.provenance,
             run_id=run_id,
         )
+    except SchemaValidationError as e:
+        # Clear, actionable 422 with schema error message
+        raise HTTPException(status_code=422, detail=str(e))
     except ValueError as e:
+        # typically unknown kind / resolution problems
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         logger.exception("upsert_artifact_failed", extra=safe_extra({"workspace_id": workspace_id, "err": str(e)}))
@@ -114,12 +135,28 @@ async def upsert_batch(
     Returns counts and per-item ops for UI diffing.
     """
     db = await get_db()
+    svc = KindRegistryService(db)
+
     results: List[Dict[str, Any]] = []
     counts = {"insert": 0, "update": 0, "noop": 0, "failed": 0}
 
     for item in payload.items:
         try:
-            art, op = await dal.upsert_artifact(db, workspace_id, item, item.provenance, run_id=run_id)
+            env = await svc.build_envelope(
+                kind_or_alias=item.kind,
+                name=item.name,
+                data=item.data,
+                supplied_schema_version=None,
+            )
+            create = ArtifactItemCreate(
+                kind=env["kind"],
+                name=env["name"],
+                data=env["data"],
+                natural_key=env["natural_key"],
+                fingerprint=env["fingerprint"],
+                provenance=item.provenance,
+            )
+            art, op = await dal.upsert_artifact(db, workspace_id, create, item.provenance, run_id=run_id)
             if op in counts:
                 counts[op] += 1
             results.append({
@@ -133,10 +170,15 @@ async def upsert_batch(
                 publish_event_v1(org=_org(), service=Service.ARTIFACT, event="created", payload=art.model_dump())
             elif op == "update":
                 publish_event_v1(org=_org(), service=Service.ARTIFACT, event="updated", payload=art.model_dump())
-        except Exception as e:
-            logger.exception("batch_upsert_failed_item", extra=safe_extra({"workspace_id": workspace_id, "err": str(e)}))
+
+        except SchemaValidationError as e:
             counts["failed"] += 1
-            results.append({"error": str(e)})
+            # 422-equivalent per item; bubble message for UI
+            results.append({"error": str(e), "kind": item.kind, "name": item.name})
+        except Exception as e:
+            logger.error("batch_upsert_failed_item", extra=safe_extra({"workspace_id": workspace_id, "err": str(e)}))
+            counts["failed"] += 1
+            results.append({"error": str(e), "kind": item.kind, "name": item.name})
 
     summary = {"counts": counts, "results": results}
     response.headers["X-Batch-Inserted"] = str(counts["insert"])
@@ -167,11 +209,6 @@ async def set_baseline_inputs(
     if_absent_only: bool = Query(default=False),
     expected_version: Optional[int] = Query(default=None, ge=1),
 ):
-    """
-    Set/replace the entire baseline inputs for a workspace.
-    - if_absent_only: only set if currently empty (first capture)
-    - expected_version: optional optimistic check on inputs_baseline_version
-    """
     db = await get_db()
     try:
         parent, op = await dal.set_inputs_baseline(
@@ -187,6 +224,7 @@ async def set_baseline_inputs(
         logger.exception("set_baseline_inputs_failed", extra=safe_extra({"workspace_id": workspace_id, "err": str(e)}))
         raise HTTPException(status_code=500, detail="Failed to set baseline inputs")
 
+    from libs.raina_common.events import Service  # local import safe
     published = True
     if op == "insert":
         published = publish_event_v1(
@@ -212,7 +250,7 @@ async def set_baseline_inputs(
     _set_event_header(response, published)
     response.headers["X-Op"] = op
     response.headers["X-Baseline-Version"] = str(parent.inputs_baseline_version)
-    return parent.model_dump()
+    return parent.model_dump(by_alias=True)
 
 
 @router.patch("/{workspace_id}/baseline-inputs")
@@ -222,11 +260,6 @@ async def patch_baseline_inputs(
     response: Response,
     expected_version: Optional[int] = Query(default=None, ge=1),
 ):
-    """
-    Merge semantics:
-      - Replace AVC or PSS wholesale if present.
-      - Upsert into FSS stories by 'key' if fss_stories_upsert provided.
-    """
     db = await get_db()
     try:
         updated = await dal.merge_inputs_baseline(
@@ -256,7 +289,7 @@ async def patch_baseline_inputs(
     )
     _set_event_header(response, published)
     response.headers["X-Baseline-Version"] = str(updated.inputs_baseline_version)
-    return updated.model_dump()
+    return updated.model_dump(by_alias=True)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -313,14 +346,6 @@ async def run_deltas(
     run_id: str = Query(..., description="Discovery run id to compute deltas for"),
     include_ids: bool = Query(default=False, description="Include grouped artifact ids"),
 ):
-    """
-    Compute per-run deltas by scanning embedded artifacts:
-      - new: lineage.first_seen_run_id == run_id
-      - updated: provenance.run_id == run_id and not new
-      - unchanged: lineage.last_seen_run_id == run_id and not (new|updated) and not deleted
-      - retired: seen previously but not seen in this run (last_seen_run_id != run_id) and not deleted
-      - deleted: deleted_at != None
-    """
     db = await get_db()
     parent = await dal.get_parent_doc(db, workspace_id)
     if not parent:

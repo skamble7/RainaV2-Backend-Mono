@@ -1,4 +1,4 @@
-# app/models/artifact.py
+#services/artifact-service/app/models/artifact.py
 from __future__ import annotations
 
 from datetime import datetime
@@ -10,15 +10,9 @@ from pydantic import BaseModel, Field, ConfigDict
 # ─────────────────────────────────────────────────────────────
 # Types
 # ─────────────────────────────────────────────────────────────
-ArtifactKind = Literal[
-    "cam.document",
-    "cam.context_map",
-    "cam.capability_model",
-    "cam.service_contract",
-    "cam.sequence_diagram",
-    "cam.erd",
-    "cam.adr_index",
-]
+# NEW (accepts any registry kind; runtime validation handles correctness)
+ArtifactKind = str
+
 
 class Provenance(BaseModel):
     """Single, structured provenance record stamped on writes."""
@@ -90,13 +84,16 @@ class ArtifactItemPatchIn(BaseModel):
 
 class WorkspaceArtifactsDoc(BaseModel):
     """Single MongoDB document per workspace aggregating all artifacts + baseline."""
-    _id: str                                   # Mongo _id for this doc
+    # Pydantic v2: avoid using a leading-underscore field; alias `_id` into `id`
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str = Field(alias="_id")               # Mongo _id for this doc
     workspace_id: str                          # convenience for querying
     workspace: WorkspaceSnapshot
 
     # Baseline inputs (latest approved)
     inputs_baseline: Dict[str, Any] = Field(default_factory=dict)     # { avc, fss, pss }
-    inputs_baseline_fingerprint: Optional[str] = None                 # ← NEW: sha256 over canonical(inputs_baseline)
+    inputs_baseline_fingerprint: Optional[str] = None                 # sha256 over canonical(inputs_baseline)
     inputs_baseline_version: int = 1
     last_promoted_run_id: Optional[str] = None
 

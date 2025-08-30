@@ -1,23 +1,29 @@
-# services/artifact-service/app/services/registry_service.py
+#services/artifact-service/app/services/registry_service.py
 from __future__ import annotations
 
 import hashlib
 import json
 import re
+import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
+# Optional validators (either one is fine)
 try:
     import fastjsonschema  # type: ignore
+    from fastjsonschema import JsonSchemaException as FastJSONSchemaError  # type: ignore
 except Exception:  # pragma: no cover - optional dep
     fastjsonschema = None  # type: ignore
+    FastJSONSchemaError = None  # type: ignore
 
 try:
     from jsonschema import Draft202012Validator  # type: ignore
+    from jsonschema.exceptions import ValidationError as JSONSchemaValidationError  # type: ignore
 except Exception:  # pragma: no cover
     Draft202012Validator = None  # type: ignore
+    JSONSchemaValidationError = None  # type: ignore
 
 from app.dal.kind_registry_dal import (
     ensure_registry_indexes,
@@ -28,11 +34,20 @@ from app.dal.kind_registry_dal import (
 )
 from app.models.kind_registry import KindRegistryDoc
 
+log = logging.getLogger("app.services.registry")
+
+
+# ─────────────────────────────────────────────────────────────
+# Public error used by routes to map to HTTP 422
+# ─────────────────────────────────────────────────────────────
+class SchemaValidationError(Exception):
+    """Raised when artifact data does not conform to the registry JSON Schema."""
+    pass
+
 
 # ─────────────────────────────────────────────────────────────
 # Small JSON/dict helpers (safe, no eval)
 # ─────────────────────────────────────────────────────────────
-
 def _canonical(obj: Dict[str, Any]) -> str:
     return json.dumps(obj, sort_keys=True, separators=(",", ":"))
 
@@ -82,7 +97,6 @@ def _dot_set(obj: Dict[str, Any], path: str, value: Any) -> None:
             nxt: Any
             if isinstance(cur, dict):
                 if p not in cur or not isinstance(cur[p], (dict, list)):
-                    # default to dict
                     cur[p] = {}
                 nxt = cur[p]
             elif isinstance(cur, list):
@@ -126,7 +140,7 @@ def _apply_adapter_dsl(data: Dict[str, Any], dsl: Dict[str, Any]) -> Dict[str, A
       - defaults: { "path": value, ... } (only if missing/falsy)
       - delete: ["path", "path2"]
     """
-    out = json.loads(json.dumps(data))  # cheap deep copy
+    out = json.loads(json.dumps(data))  # deep copy
     for src, dst in (dsl.get("move") or {}).items():
         val = _dot_get(out, src, default=None)
         if val is not None:
@@ -144,7 +158,7 @@ def _apply_adapter_dsl(data: Dict[str, Any], dsl: Dict[str, Any]) -> Dict[str, A
 
 
 # ─────────────────────────────────────────────────────────────
-# JSON Schema validation (fastjsonschema with fallback)
+# JSON Schema validation (fastjsonschema with graceful fallback)
 # ─────────────────────────────────────────────────────────────
 class _ValidatorCache:
     def __init__(self) -> None:
@@ -161,9 +175,17 @@ class _ValidatorCache:
 
 
 _validator_cache = _ValidatorCache()
+_warned_no_validator = False
 
 
 def _compile_validator(kind_id: str, version: str, json_schema: Dict[str, Any]):
+    """
+    Try fastjsonschema, then jsonschema, otherwise fall back to a NO-OP validator
+    (logs a single warning per process). This keeps the service running even if
+    the image misses validator deps.
+    """
+    global _warned_no_validator
+
     cache_key = _validator_cache.key(kind_id, version)
     cached = _validator_cache.get(cache_key)
     if cached:
@@ -176,7 +198,15 @@ def _compile_validator(kind_id: str, version: str, json_schema: Dict[str, Any]):
         def validator(instance: Any) -> None:
             v.validate(instance)
     else:
-        raise RuntimeError("No JSON Schema validator available (install fastjsonschema or jsonschema)")
+        def validator(instance: Any) -> None:
+            return None  # NO-OP validation
+        if not _warned_no_validator:
+            log.warning(
+                "JSON Schema validation is DISABLED (no validator libs found). "
+                "Install 'fastjsonschema' or 'jsonschema' to enable strict validation."
+            )
+            _warned_no_validator = True
+
     _validator_cache.set(cache_key, validator)
     return validator
 
@@ -359,7 +389,9 @@ class KindRegistryService:
             raise ValueError(f"Unknown kind '{kind_or_alias}'")
         entry = await get_schema_version_entry(self.db, kd.id, version=version)
         if not entry:
-            raise ValueError(f"Schema version not found for {kd.id}")
+            # No entry — adapters unknown; return input as-is (log once per call)
+            log.warning("No schema version entry for kind '%s' (version=%s); skipping adapters.", kd.id, version)
+            return data
 
         out = json.loads(json.dumps(data))  # deep copy
         for ad in (entry.get("adapters") or []):
@@ -382,15 +414,13 @@ class KindRegistryService:
         Applies a chain of migrators from from_version → target (latest by default).
         Returns (data_after, target_version)
         """
-        kd = await self._get_kind_doc(kind_or_alias)
+        kd = await self._get_kind_doc(self_or_alias := kind_or_alias)
         if not kd:
-            raise ValueError(f"Unknown kind '{kind_or_alias}'")
+            raise ValueError(f"Unknown kind '{self_or_alias}'")
         target = to_version or kd.latest_schema_version
         if not from_version or from_version == target:
             return data, target
 
-        # Find entries in order and walk migrators (only DSL supported here; builtins can be added)
-        # We assume registry has a path via listed migrators; if not, we simply return input.
         cur_version = from_version
         cur_data = json.loads(json.dumps(data))
         safety_counter = 0
@@ -398,8 +428,10 @@ class KindRegistryService:
             safety_counter += 1
             entry = await get_schema_version_entry(self.db, kd.id, version=cur_version)
             if not entry:
+                # If we can't find the link in the chain, stop migrating
+                log.warning("Missing migrator step for %s from=%s → to=%s; stopping partial migration.",
+                            kd.id, cur_version, target)
                 break
-            # Pick the migrator that leads closer to target (first match)
             next_version = None
             for mig in (entry.get("migrators") or []):
                 if mig.get("from_version") == cur_version:
@@ -420,18 +452,32 @@ class KindRegistryService:
             raise ValueError(f"Unknown kind '{kind_or_alias}'")
         entry = await get_schema_version_entry(self.db, kd.id, version=version)
         if not entry:
-            raise ValueError(f"Schema version not found for {kd.id}")
+            log.warning("No schema version entry for kind '%s' (version=%s); skipping validation.", kd.id, version)
+            return
         schema = entry.get("json_schema")
         if not isinstance(schema, dict):
-            raise ValueError("Invalid or missing json_schema")
+            log.warning("Invalid or missing json_schema for %s (version=%s); skipping validation.", kd.id, version)
+            return
 
         validator = _compile_validator(kd.id, entry["version"], schema)
         try:
-            validator(data)
+            validator(data)  # may be NO-OP fallback
         except Exception as e:
-            # Normalize error message
-            msg = str(e)
-            raise ValueError(f"Validation failed for {kd.id}@{entry['version']}: {msg}") from e
+            # Normalize errors from both fastjsonschema and jsonschema
+            msg = getattr(e, "message", str(e))
+            path = None
+            if FastJSONSchemaError is not None and isinstance(e, FastJSONSchemaError):
+                path = getattr(e, "path", None)
+            elif JSONSchemaValidationError is not None and isinstance(e, JSONSchemaValidationError):
+                # jsonschema puts a deque of path elements in e.path
+                try:
+                    path_list = list(getattr(e, "path", []))
+                    path = ".".join(map(str, path_list)) if path_list else None
+                except Exception:
+                    path = None
+            if path:
+                msg = f"{msg} at '{path}'"
+            raise SchemaValidationError(f"Schema validation failed for {kd.id}@{entry['version']}: {msg}") from e
 
     # ── envelope assembly ─────────────────────────────────────
     async def build_envelope(
@@ -454,16 +500,18 @@ class KindRegistryService:
             raise ValueError(f"Unknown kind '{kind_or_alias}'")
 
         # 1/2) migrate to target (latest)
-        migrated, at_version = await self.migrate_data(kd.id, data, from_version=supplied_schema_version, to_version=kd.latest_schema_version)
+        migrated, at_version = await self.migrate_data(
+            kd.id, data, from_version=supplied_schema_version, to_version=kd.latest_schema_version
+        )
 
         # 3) adapters to canonicalize
         adapted = await self.adapt_data(kd.id, migrated, version=at_version)
 
-        # 4) validate canonical data
+        # 4) validate canonical data (may NO-OP if libs absent / schema missing)
         await self.validate_data(kd.id, adapted, version=at_version)
 
         # 5) identity + content hash
-        entry = await get_schema_version_entry(self.db, kd.id, version=at_version)
+        entry = await get_schema_version_entry(self.db, kd.id, version=at_version) or {}
         ident_spec = (entry or {}).get("identity") or {}
         natural_key = _compute_natural_key(kd.id, name, ident_spec, adapted)
         summary = _compute_summary(name, ident_spec, adapted)

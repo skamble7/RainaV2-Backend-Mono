@@ -1,4 +1,3 @@
-#services/artifact-service/app/dal/artifact_dal.py
 from __future__ import annotations
 
 import json
@@ -8,7 +7,7 @@ from datetime import datetime
 from typing import Optional, List, Dict, Any, Tuple, Iterable
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
-from pymongo import ASCENDING, DESCENDING
+from pymongo import ASCENDING, DESCENDING, ReturnDocument
 
 from ..models.artifact import (
     ArtifactItem,
@@ -58,7 +57,7 @@ async def ensure_indexes(db: AsyncIOMotorDatabase):
 
     # Baseline inputs and metadata (useful filters)
     await col.create_index([("inputs_baseline_version", DESCENDING)])
-    await col.create_index([("inputs_baseline_fingerprint", ASCENDING)])  # ← NEW
+    await col.create_index([("inputs_baseline_fingerprint", ASCENDING)])
     await col.create_index([("last_promoted_run_id", ASCENDING)])
 
     # Patch history
@@ -82,10 +81,10 @@ async def create_parent_doc(
     fp = _sha256(_canonical(inputs_baseline)) if inputs_baseline else None
     doc = {
         "_id": str(uuid.uuid4()),
-        "workspace_id": workspace.id,                           # <- was workspace._id
-        "workspace": workspace.model_dump(by_alias=True),       # <- ensure _id stored
+        "workspace_id": workspace.id,
+        "workspace": workspace.model_dump(by_alias=True),
         "inputs_baseline": inputs_baseline or {},
-        "inputs_baseline_fingerprint": fp,                      # ← NEW
+        "inputs_baseline_fingerprint": fp,
         "inputs_baseline_version": inputs_baseline_version,
         "last_promoted_run_id": last_promoted_run_id,
         "artifacts": [],
@@ -105,10 +104,10 @@ async def refresh_workspace_snapshot(db, workspace: WorkspaceSnapshot) -> bool:
     """Update the denormalized workspace snapshot inside the parent doc; create if missing."""
     now = datetime.utcnow()
     res = await db[WORKSPACE_ARTIFACTS].update_one(
-        {"workspace_id": workspace.id},                         # <- was workspace._id
+        {"workspace_id": workspace.id},
         {
             "$set": {
-                "workspace": workspace.model_dump(by_alias=True),   # <- keep _id in snapshot
+                "workspace": workspace.model_dump(by_alias=True),
                 "updated_at": now,
             }
         },
@@ -152,9 +151,6 @@ async def set_inputs_baseline(
     """
     Set/replace the entire inputs_baseline.
     Returns: (updated_parent_doc, op) where op ∈ {"insert","replace","noop"}
-    - insert: baseline was empty, now set (version stays 1)
-    - replace: baseline existed and was replaced (version += 1)
-    - noop: if_absent_only=True and baseline already existed
     """
     now = datetime.utcnow()
     parent = await get_parent_doc(db, workspace_id)
@@ -183,7 +179,7 @@ async def set_inputs_baseline(
             },
             "$inc": {"inputs_baseline_version": 1 if existed else 0},
         },
-        return_document=True,
+        return_document=ReturnDocument.AFTER,
     )
     return WorkspaceArtifactsDoc(**res), ("replace" if existed else "insert")
 
@@ -248,7 +244,7 @@ async def merge_inputs_baseline(
             },
             "$inc": {"inputs_baseline_version": 1},
         },
-        return_document=True,
+        return_document=ReturnDocument.AFTER,
     )
     return WorkspaceArtifactsDoc(**res)
 
@@ -403,10 +399,9 @@ async def upsert_artifact(
                     "updated_at": now,
                 }
             },
-            return_document=True,
+            return_document=ReturnDocument.AFTER,
             projection={"artifacts": 1, "_id": 0},
         )
-        # return updated existing view
         a = next((x for x in res["artifacts"] if x.get("natural_key") == natural_key), None)
         return ArtifactItem(**a), "noop"
 
@@ -428,7 +423,7 @@ async def upsert_artifact(
             },
             "$inc": {"artifacts.$.version": 1},
         },
-        return_document=True,
+        return_document=ReturnDocument.AFTER,
         projection={"artifacts": 1, "_id": 0},
     )
     if not res:
@@ -462,7 +457,7 @@ async def replace_artifact(
             "$inc": {"artifacts.$[a].version": 1},
         },
         array_filters=[{"a.artifact_id": artifact_id}],
-        return_document=True,
+        return_document=ReturnDocument.AFTER,
         projection={"artifacts": 1, "_id": 0},
     )
     if not res:
@@ -487,7 +482,7 @@ async def soft_delete_artifact(
             }
         },
         array_filters=[{"a.artifact_id": artifact_id, "a.deleted_at": None}],
-        return_document=True,
+        return_document=ReturnDocument.AFTER,
         projection={"artifacts": 1, "_id": 0},
     )
     if not res:
@@ -531,7 +526,7 @@ async def list_patches(
 
 
 # ─────────────────────────────────────────────────────────────
-# Run delta computation (NEW)
+# Run delta computation
 # ─────────────────────────────────────────────────────────────
 def _prov_run_id(prov: Optional[Provenance | Dict[str, Any]]) -> Optional[str]:
     """
@@ -540,13 +535,11 @@ def _prov_run_id(prov: Optional[Provenance | Dict[str, Any]]) -> Optional[str]:
     """
     if prov is None:
         return None
-    # Pydantic model (Preferred)
     if hasattr(prov, "run_id"):
         try:
             return getattr(prov, "run_id")
         except Exception:
             pass
-    # Fallback: dict (legacy stored shape)
     if isinstance(prov, dict):
         return prov.get("run_id")
     return None
@@ -587,13 +580,10 @@ def compute_run_deltas(
         if first_seen == run_id:
             buckets["new"].append(a.artifact_id)
         elif prov_run == run_id:
-            # changed during this run
             buckets["updated"].append(a.artifact_id)
         elif last_seen == run_id:
-            # observed this run but not changed/new
             buckets["unchanged"].append(a.artifact_id)
         else:
-            # existed prior, not deleted, and not seen in this run
             buckets["retired"].append(a.artifact_id)
 
     counts = {k: len(v) for k, v in buckets.items()}
