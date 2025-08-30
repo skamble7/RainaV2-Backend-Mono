@@ -17,10 +17,6 @@ from app.infra.rabbit import publish_event_v1
 SOFT_FAIL_ON_RESOLVE_ERROR = True
 
 
-def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
 def _ctx(state: DiscoveryState) -> dict:
     return state.setdefault("context", {})
 
@@ -38,10 +34,14 @@ def _cap_kinds(cap: dict) -> List[str]:
     return [k for k in kinds if isinstance(k, str)]
 
 
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 def _publish(event: str, payload: dict, headers: Optional[dict] = None) -> None:
     publish_event_v1(
         org=settings.EVENTS_ORG,
-        event=event,  # e.g., "step", "step.started", "step.completed", "step.failed"
+        event=event,
         payload=payload,
         headers=headers or {},
     )
@@ -74,6 +74,33 @@ def _resolve_agent_for_capability(capability_id: str):
     return agent
 
 
+# ---- legacy → canonical mapping ----------------------------------------
+_ALIAS_TO_CANON = {
+    # diagrams
+    "cam.context_map": "cam.diagram.context",
+    "cam.erd": "cam.diagram.class",
+    "cam.sequence_diagram": "cam.diagram.sequence",
+    "cam.component_diagram": "cam.diagram.component",
+    "cam.deployment_topology": "cam.diagram.deployment",
+    # workflows / security / contracts
+    "cam.workflow": "cam.workflow.process",
+    "cam.security_policies": "cam.security.policy",
+    "cam.service_contract": "cam.contract.api",
+    "cam.events": "cam.contract.event",
+    # misc historical
+    "cam.adr_index": "cam.gov.adr.index",
+}
+
+def _canon_kind(k: Optional[str]) -> Optional[str]:
+    if not k or not isinstance(k, str):
+        return None
+    k = k.strip()
+    if not k:
+        return None
+    return _ALIAS_TO_CANON.get(k, k)
+
+
+# ---- core runner --------------------------------------------------------
 async def _run_single_step(state: DiscoveryState, step: dict) -> None:
     run_id = _ctx(state).get("run_id")
     workspace_id = state.get("workspace_id")
@@ -81,11 +108,22 @@ async def _run_single_step(state: DiscoveryState, step: dict) -> None:
 
     cap_id: str = (step.get("capability") or step.get("capability_id") or "").strip()
     step_id: str = (step.get("id") or cap_id or "step").strip()
-    params: Dict[str, Any] = step.get("params") or {}
+    params: Dict[str, Any] = dict(step.get("params") or {})
 
     cap_doc = _cap_map(state).get(cap_id) or {}
-    started_at = _utc_now_iso()
+    produces_kinds = _cap_kinds(cap_doc)
 
+    # NEW: enrich params so agents can infer the desired kind
+    params.setdefault("produces_kinds", produces_kinds)
+    if "kind" not in params and produces_kinds:
+        params["kind"] = produces_kinds[0]
+    if "kind" in params:
+        params["kind"] = _canon_kind(params["kind"]) or params["kind"]
+
+    # Also stash per-step meta for persist_node to consult if needed
+    _ctx(state).setdefault("step_cap_meta", {})[step_id] = {"produces_kinds": produces_kinds}
+
+    started_at = _utc_now_iso()
     started_payload = {
         "run_id": str(run_id),
         "workspace_id": str(workspace_id),
@@ -93,7 +131,7 @@ async def _run_single_step(state: DiscoveryState, step: dict) -> None:
         "step": {"id": step_id, "capability_id": cap_id, "name": _cap_name(cap_doc)},
         "params": params,
         "started_at": started_at,
-        "produces_kinds": _cap_kinds(cap_doc),
+        "produces_kinds": produces_kinds,
         "status": "started",
     }
     _publish_step("started", started_payload)
@@ -115,7 +153,7 @@ async def _run_single_step(state: DiscoveryState, step: dict) -> None:
             "started_at": started_at,
             "ended_at": _utc_now_iso(),
             "duration_s": round(t1 - t0, 3),
-            "produces_kinds": _cap_kinds(cap_doc),
+            "produces_kinds": produces_kinds,
             "status": "failed",
             "error": f"agent_resolve_error: {e}",
         }
@@ -158,7 +196,7 @@ async def _run_single_step(state: DiscoveryState, step: dict) -> None:
                 _ctx(state).setdefault("tasks", []).extend(result["tasks"])
 
         t1 = time.perf_counter()
-        completed_payload = {
+        done = {
             "run_id": str(run_id),
             "workspace_id": str(workspace_id),
             "playbook_id": playbook_id,
@@ -167,11 +205,11 @@ async def _run_single_step(state: DiscoveryState, step: dict) -> None:
             "started_at": started_at,
             "ended_at": _utc_now_iso(),
             "duration_s": round(t1 - t0, 3),
-            "produces_kinds": _cap_kinds(cap_doc),
+            "produces_kinds": produces_kinds,
             "status": "completed",
         }
-        _publish_step("completed", completed_payload)
-        _push_step_event(state, completed_payload)
+        _publish_step("completed", done)
+        _push_step_event(state, done)
 
     except Exception as e:
         t1 = time.perf_counter()
@@ -184,7 +222,7 @@ async def _run_single_step(state: DiscoveryState, step: dict) -> None:
             "started_at": started_at,
             "ended_at": _utc_now_iso(),
             "duration_s": round(t1 - t0, 3),
-            "produces_kinds": _cap_kinds(cap_doc),
+            "produces_kinds": produces_kinds,
             "status": "failed",
             "error": str(e),
         }

@@ -1,44 +1,44 @@
-# app/agents/registry.py
-# Maps capability_id -> agent instance and provides a single helper for lookups.
-
 from __future__ import annotations
+
 from typing import Dict, Optional
 
-from app.agents.spi import RainaAgent
+# Import any existing handcrafted agents you still want to support explicitly.
+# from app.agents.some_legacy_agent import SomeLegacyAgent
+from app.agents.generic_kind_agent import GenericKindAgent
 
-# Microservices agents
-from app.agents.micro.context_map import ContextMapAgent
-from app.agents.micro.service_catalog import ServiceCatalogAgent
-from app.agents.micro.api_contracts import ApiContractsAgent
-from app.agents.micro.domain_erd import DomainErdAgent
-from app.agents.micro.sequence_diagram import SequenceDiagramAgent
-from app.agents.micro.component_diagram import ComponentDiagramAgent
-from app.agents.micro.deployment_topology import DeploymentTopologyAgent
-from app.agents.micro.authz_policies import AuthzPoliciesAgent
-from app.agents.micro.app_workflows import AppWorkflowsAgent
-
-# capability_id → concrete agent instance
-_REGISTRY: Dict[str, RainaAgent] = {
-    # Core discovery
-    "cap.discover.context_map": ContextMapAgent(),
-    "cap.catalog.services":     ServiceCatalogAgent(),
-    "cap.contracts.api":        ApiContractsAgent(),
-
-    # Diagrams & models
-    "cap.generate.domain_diagrams": DomainErdAgent(),
-    "cap.generate.sequence":        SequenceDiagramAgent(),
-    "cap.generate.component":       ComponentDiagramAgent(),
-
-    # Platform/NFR/Security/Workflows
-    "cap.deploy.topology":          DeploymentTopologyAgent(),
-    "cap.security.authz":           AuthzPoliciesAgent(),
-    "cap.workflows.app":            AppWorkflowsAgent(),
+# Explicit overrides by capability id (if you still have custom agents)
+_OVERRIDES: Dict[str, object] = {
+    # "capability.api_contracts": SomeLegacyAgent(),
+    # keep empty if you want everything to go via GenericKindAgent
 }
 
-def agent_for_capability(capability_id: str) -> Optional[RainaAgent]:
-    """
-    Look up the agent instance for a given capability_id.
-    """
-    return _REGISTRY.get((capability_id or "").strip())
+# Global generic fallback
+_GENERIC = GenericKindAgent()
 
-__all__ = ["agent_for_capability"]
+
+# Optional: keep any specialized agents you still want to use, otherwise:
+def agent_for_capability(capability_id: str) -> Any:
+    # One generic agent instance is fine; they're stateless
+    return GenericKindAgent()
+
+
+def register_override(capability_id: str, agent_obj) -> None:
+    """Optional: allow runtime registration for experiments/tests."""
+    _OVERRIDES[capability_id] = agent_obj
+
+
+def resolve_kind_from_capability(capability_id: str, capability_map: Optional[dict]) -> Optional[str]:
+    """
+    Helper to find a canonical kind for a capability from the capability map produced in ingest.
+    Expected shapes (best-effort):
+      capability_map[capability_id] -> { "produces": { "kinds": ["cam.contract.api", ...] } }
+    """
+    if not capability_map:
+        return None
+    meta = capability_map.get(capability_id) or {}
+    prod = meta.get("produces") or {}
+    kinds = prod.get("kinds") or []
+    if kinds:
+        return kinds[0]
+    # Fallbacks: direct kind field, or alias
+    return meta.get("kind") or meta.get("alias")

@@ -1,3 +1,4 @@
+#services/discovery-service/app/clients/artifact_service.py
 from __future__ import annotations
 
 import uuid
@@ -199,3 +200,39 @@ async def get_run_deltas(
         if r.is_error:
             raise httpx.HTTPStatusError(f"{r.status_code}: {r.text}", request=r.request, response=r)
         return r.json()
+    
+
+# ─────────────────────────────────────────────────────────────
+# Kind prompts (optional, used by GenericKindAgent)
+# ─────────────────────────────────────────────────────────────
+async def get_kind_prompt(kind: str) -> str:
+    """
+    Fetches the discovery prompt template for a given kind from artifact-service.
+    Returns "" if not found.
+    """
+    headers = _corr_headers()
+    base = settings.ARTIFACT_SERVICE_URL.rstrip("/")
+    # Endpoint name aligns with our artifact-service routers; tolerate both shapes
+    candidates = [
+        f"{base}/registry/kinds/{kind}/prompt",
+        f"{base}/registry/kind/{kind}/prompt",
+    ]
+    async with httpx.AsyncClient(timeout=settings.REQUEST_TIMEOUT_S, headers=headers) as client:
+        for url in candidates:
+            try:
+                r = await client.get(url)
+                if r.status_code == 404:
+                    continue
+                r.raise_for_status()
+                # Accept either {"prompt": "..."} or raw text
+                try:
+                    js = r.json()
+                    if isinstance(js, dict) and "prompt" in js and isinstance(js["prompt"], str):
+                        return js["prompt"]
+                except Exception:
+                    pass
+                return r.text or ""
+            except Exception:
+                continue
+    return ""
+
