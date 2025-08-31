@@ -1,4 +1,3 @@
-#services/discovery-service/app/models/state.py
 from typing import TypedDict, Any, List, Dict
 
 class DiscoveryState(TypedDict, total=False):
@@ -8,8 +7,20 @@ class DiscoveryState(TypedDict, total=False):
     inputs: dict
     options: dict
     plan: dict
-    artifacts: List[dict]           # CAM artifacts ready for persistence
+
+    # Generated artifacts (pre-persist)
+    artifacts: List[dict]
+
+    # Validators & logging
     validations: List[dict]
     logs: List[str]
     errors: List[str]
-    context: Dict[str, Any]         # playbook, capabilities, etc.
+
+    # Planner/ingest context, playbook metadata, etc.
+    context: Dict[str, Any]
+
+    # ⬇️ Explicitly include these so nothing ever drops them downstream
+    run_artifacts: List[dict]
+    artifacts_diff: Dict[str, Any]   # {new[], updated[], unchanged[], retired[], counts{...}}
+    deltas: Dict[str, Any]           # {counts{...}}
+    strategy: str                    # "baseline" | "delta"

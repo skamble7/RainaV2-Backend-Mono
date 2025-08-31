@@ -46,13 +46,6 @@ def _publish(event: str, payload: dict, headers: Optional[dict] = None) -> None:
 
 
 def _publish_step(status: str, payload: dict, headers: Optional[dict] = None) -> None:
-    """
-    Compatibility publishing:
-      - flat:  raina.discovery.step.v1           (payload.status carries started/completed/failed)
-      - dotted: raina.discovery.step.started.v1  (or completed/failed)
-    Many consumers bind to raina.discovery.*.v1, which misses dotted variants with extra tokens.
-    """
-    # Ensure status is present in payload for the flat event
     payload = dict(payload)
     payload["status"] = status
     _publish("step", payload, headers)
@@ -80,9 +73,6 @@ def _natural_key(a: Dict[str, Any]) -> str:
 
 
 def _canon_kind(k: Optional[str]) -> Optional[str]:
-    """
-    No legacy aliases anymore. Keep the incoming kind as-is (trimmed).
-    """
     if not k or not isinstance(k, str):
         return None
     k = k.strip()
@@ -90,17 +80,7 @@ def _canon_kind(k: Optional[str]) -> Optional[str]:
 
 
 def _coerce_artifact_list(val: Any, default_kind: Optional[str], step_id: Optional[str]) -> List[Dict[str, Any]]:
-    """
-    Accept:
-      - dict  -> [dict]
-      - list  -> list[dict] (ignore non-dicts)
-      - str   -> json.loads then recurse (if possible)
-      - other -> []
-    Fill in missing 'kind' with inferred default, inject _step_id for traceability.
-    """
     items: List[Dict[str, Any]] = []
-
-    # If it's a JSON string, try parsing once
     if isinstance(val, str):
         try:
             val = json.loads(val)
@@ -123,20 +103,14 @@ def _coerce_artifact_list(val: Any, default_kind: Optional[str], step_id: Option
 
 
 def _merge_artifacts(state: DiscoveryState, incoming: List[Dict[str, Any]]) -> int:
-    """
-    Dedup by (kind,name) natural key; last write wins.
-    Returns number of items actually merged.
-    """
     bucket = state.setdefault("artifacts", [])
-    # Build index of existing keys
-    idx = { _natural_key(a): i for i, a in enumerate(bucket) if isinstance(a, dict) }
+    idx = {_natural_key(a): i for i, a in enumerate(bucket) if isinstance(a, dict)}
     merged = 0
     for it in incoming:
         if not isinstance(it, dict):
             continue
         nk = _natural_key(it)
         if not nk:
-            # Skip malformed entries without kind/name
             continue
         if nk in idx:
             bucket[idx[nk]] = it
@@ -160,14 +134,12 @@ async def _run_single_step(state: DiscoveryState, step: dict) -> None:
     cap_doc = _cap_map(state).get(cap_id) or {}
     produces_kinds = _cap_kinds(cap_doc)
 
-    # NEW: enrich params so agents can infer the desired kind
     params.setdefault("produces_kinds", produces_kinds)
     if "kind" not in params and produces_kinds:
         params["kind"] = produces_kinds[0]
     if "kind" in params:
         params["kind"] = _canon_kind(params["kind"]) or params["kind"]
 
-    # Also stash per-step meta for persist_node to consult if needed
     _ctx(state).setdefault("step_cap_meta", {})[step_id] = {"produces_kinds": produces_kinds}
 
     started_at = _utc_now_iso()
@@ -186,7 +158,6 @@ async def _run_single_step(state: DiscoveryState, step: dict) -> None:
 
     t0 = time.perf_counter()
 
-    # Resolve the agent via capability_id
     try:
         agent = _resolve_agent_for_capability(cap_id)
     except Exception as e:
@@ -211,7 +182,6 @@ async def _run_single_step(state: DiscoveryState, step: dict) -> None:
             return
         raise
 
-    # Run the agent
     try:
         ctx_env = {
             "avc": (state.get("inputs") or {}).get("avc") or {},
@@ -243,7 +213,6 @@ async def _run_single_step(state: DiscoveryState, step: dict) -> None:
             if result.get("tasks"):
                 _ctx(state).setdefault("tasks", []).extend(result["tasks"])
 
-        # Debug: surface progress for persist_node
         total_artifacts = len(state.get("artifacts") or [])
         state.setdefault("logs", []).append(
             f"Runner: step {step_id} merged {merged_count} items (total={total_artifacts})"

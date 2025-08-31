@@ -1,27 +1,20 @@
 # app/db/discovery_runs.py
 from datetime import datetime
 from typing import Optional, List
-
 from pydantic import UUID4
 from pymongo import ASCENDING, DESCENDING
-from pymongo.errors import DuplicateKeyError
 
 from app.models.discovery import DiscoveryRun, StartDiscoveryRequest, InputsDiff
 
-
 COLLECTION = "discovery_runs"
-
 
 def init_indexes(db):
     col = db[COLLECTION]
-    # Many runs per workspace – remove uniqueness
     col.create_index([("workspace_id", ASCENDING), ("created_at", DESCENDING)])
-    # Unique id per run
     col.create_index([("run_id", ASCENDING)], unique=True)
-    # Useful filters
     col.create_index([("playbook_id", ASCENDING)])
     col.create_index([("status", ASCENDING)])
-
+    col.create_index([("strategy", ASCENDING)])
 
 def create_discovery_run(
     db,
@@ -32,7 +25,7 @@ def create_discovery_run(
     input_diff: Optional[InputsDiff] = None,
     strategy: str = "delta",
 ) -> DiscoveryRun:
-    """Insert a new run in 'created' state (multiple runs per workspace allowed)."""
+    """Insert a new run in 'created' state."""
     col = db[COLLECTION]
     run = DiscoveryRun(
         run_id=run_id,
@@ -40,23 +33,19 @@ def create_discovery_run(
         playbook_id=req.playbook_id,
         inputs=req.inputs,
         options=req.options or {},
-        # NEW: persist friendly metadata
         title=getattr(req, "title", None),
         description=getattr(req, "description", None),
-        # Identity & diff
         input_fingerprint=input_fingerprint,
         input_diff=input_diff,
-        strategy=strategy,  # baseline|delta|rebuild
+        strategy=strategy,  # baseline|delta
         status="created",
     )
     col.insert_one(run.model_dump(mode="json"))
     return run
 
-
 def get_by_run_id(db, run_id: UUID4) -> Optional[DiscoveryRun]:
     doc = db[COLLECTION].find_one({"run_id": str(run_id)})
     return DiscoveryRun.model_validate(doc) if doc else None
-
 
 def list_by_workspace(db, workspace_id: UUID4, limit: int = 50, offset: int = 0) -> List[DiscoveryRun]:
     cur = (
@@ -68,7 +57,6 @@ def list_by_workspace(db, workspace_id: UUID4, limit: int = 50, offset: int = 0)
     )
     return [DiscoveryRun.model_validate(d) for d in cur]
 
-
 def get_latest_by_workspace(db, workspace_id: UUID4) -> Optional[DiscoveryRun]:
     doc = (
         db[COLLECTION]
@@ -79,11 +67,9 @@ def get_latest_by_workspace(db, workspace_id: UUID4) -> Optional[DiscoveryRun]:
     )
     return DiscoveryRun.model_validate(doc) if doc else None
 
-
 def delete_by_run_id(db, run_id: UUID4) -> bool:
     res = db[COLLECTION].delete_one({"run_id": str(run_id)})
     return res.deleted_count > 0
-
 
 def set_status(db, run_id: UUID4, status: str, **fields):
     db[COLLECTION].update_one(
