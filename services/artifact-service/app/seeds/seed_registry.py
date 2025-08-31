@@ -71,7 +71,6 @@ def artifact_of(kind: str) -> str:
     return kind.split(".")[-1]
 
 def doc_type_for(kind: str) -> str:
-    # canonical doc_type string to embed in schemas
     return artifact_of(kind)
 
 PROMPT_DEFAULT = {
@@ -168,9 +167,88 @@ def simple_kv(value_type: Dict[str, Any]) -> Dict[str, Any]:
     return {"type": "object", "additionalProperties": value_type}
 
 # ─────────────────────────────────────────────────────────────
+# Diagram prompt helpers
+# ─────────────────────────────────────────────────────────────
+DIAGRAM_SHAPE_HINTS: Dict[str, str] = {
+    "context": (
+        "Use rounded rectangles for systems/contexts; dashed borders for external systems; "
+        "solid arrows for data/control flows; group related subsystems; place primary system center."
+    ),
+    "sequence": (
+        "Use UML lifelines (vertical) for participants; activation bars for processing; "
+        "solid arrows for sync calls, dashed for returns, labeled with message; top-to-bottom time flow."
+    ),
+    "component": (
+        "Use UML component shapes for components; group by layer (presentation, domain, data); "
+        "solid arrows for dependencies; use provided 'layer' for arrangement."
+    ),
+    "deployment": (
+        "Use nodes for servers/pods/gateways/db/cache/queue/mesh/function; nest within zones; "
+        "label connections with protocol:port; cluster by environment."
+    ),
+    "state": (
+        "Use initial dot, rounded rectangles for states, bullseye for final; "
+        "arrows labeled with event/guard; left-to-right primary flow."
+    ),
+    "activity": (
+        "Use rounded rectangles for tasks, diamonds for gateways, circles for start/end events; "
+        "arrows labeled with conditions; swimlanes if owner present."
+    ),
+    "dataflow": (
+        "Use circles for processes, parallel lines for data stores, open-ended arrows labeled with data."
+    ),
+    "network": (
+        "Use cloud/VPC containers with CIDR; rectangles for subnets; connectors for routes; annotate edges with targets."
+    ),
+    "class": (
+        "Use UML class boxes with attributes; crow's foot for relationships per cardinality; "
+        "group related entities; primary keys marked with «pk»."
+    ),
+}
+
+# Minimal valid draw.io exemplar to anchor the format
+MINIMAL_DRAWIO_EXAMPLE = (
+    "<mxfile host=\"app.diagrams.net\"><diagram id=\"d1\" name=\"Page-1\">"
+    "<mxGraphModel><root>"
+    "<mxCell id=\"0\"/><mxCell id=\"1\" parent=\"0\"/>"
+    "<mxCell id=\"n1\" value=\"Example\" style=\"rounded=1;whiteSpace=wrap;html=1;\" vertex=\"1\"><mxGeometry x=\"40\" y=\"40\" width=\"120\" height=\"60\" as=\"geometry\"/></mxCell>"
+    "</root></mxGraphModel>"
+    "</diagram></mxfile>"
+)
+
+def _diagram_user_template_for(kind: str) -> str:
+    diagram_type = artifact_of(kind)
+    shape_hint = DIAGRAM_SHAPE_HINTS.get(diagram_type, "")
+
+    return (
+        "Inputs: {{ inputs | tojson }}\n"
+        "Params: {{ params | tojson }}\n"
+        "Schema: {{ schema | tojson }}\n"
+        f"Task: Generate a Draw.io (mxfile) XML for a '{diagram_type}' diagram from the identified nodes/edges/data.\n"
+        "Requirements:\n"
+        "1) Map each node/edge to an appropriate Draw.io shape and style. Prefer standard UML/BPMN/network symbols for this diagram type.\n"
+        "2) If a node/edge has meta.shape or meta.style, RESPECT it; otherwise choose sensible defaults for its type.\n"
+        "3) Ensure clean layout (avoid overlaps). For sequences: top-to-bottom time; for state/activity: clear flow; "
+        "for components/deployment: group by layer/zone/environment if provided.\n"
+        "4) Use labels from 'name'/'label', and annotate connections with protocol/port/message/condition when present.\n"
+        f"5) Style guidance: {shape_hint}\n\n"
+        "Output:\n"
+        "- Return exactly one JSON object that conforms to the schema.\n"
+        "- Put the COMPLETE Draw.io XML in the 'instructions' field and set 'language' to 'drawio'.\n"
+        "- The XML MUST be a single <mxfile>…</mxfile> document (see exemplar below). No prose, no markdown.\n\n"
+        "Exemplar (format to imitate — NOT your actual content):\n"
+        f"{MINIMAL_DRAWIO_EXAMPLE}\n"
+    )
+
+# ─────────────────────────────────────────────────────────────
 # Family schema builders (concise but useful)
 # ─────────────────────────────────────────────────────────────
 def schema_diagram(kind: str) -> Dict[str, Any]:
+    """
+    Diagram schemas include:
+      - language: const 'drawio' (REQUIRED)
+      - instructions: REQUIRED Draw.io XML (mxfile). Enforced via pattern.
+    """
     art = artifact_of(kind)
     base_node = obj({
         "id": {"type": "string"},
@@ -187,6 +265,14 @@ def schema_diagram(kind: str) -> Dict[str, Any]:
 
     props = {
         "doc_type": {"const": art},
+        "language": {"const": "drawio"},
+        # MUST look like a draw.io mxfile
+        "instructions": {
+            "type": "string",
+            "minLength": 20,
+            "pattern": r"^\s*<mxfile\b[\s\S]*</mxfile>\s*$",
+            "description": "Complete Draw.io (mxfile) XML document.",
+        },
         "nodes": arr(base_node),
         "edges": arr(base_edge),
         "notes": {"type": "string"},
@@ -217,7 +303,13 @@ def schema_diagram(kind: str) -> Dict[str, Any]:
         dep = obj({"from":{"type":"string"},"to":{"type":"string"},"type":{"type":"string"}}, req=["from","to"], addl=False)
         props.update({"components": arr(comp), "dependencies": arr(dep)})
     elif art == "deployment":
-        node = obj({"id":{"type":"string"},"name":{"type":"string"},"kind":{"enum":["server","pod","node","gateway","db","cache","queue","mesh","function"]},"zone":{"type":"string"}}, req=["id","name"], addl=False)
+        # 🔧 WIDENED ENUM: add "microservice" and "service"
+        node = obj({
+            "id":   {"type":"string"},
+            "name": {"type":"string"},
+            "kind": {"enum":["server","pod","node","gateway","db","cache","queue","mesh","function","microservice","service"]},
+            "zone": {"type":"string"}
+        }, req=["id","name"], addl=False)
         conn = obj({"from":{"type":"string"},"to":{"type":"string"},"protocol":{"type":"string"},"port":{"type":["integer","string"]}}, req=["from","to"], addl=False)
         props.update({"environment": {"type":"string"}, "nodes": arr(node), "connections": arr(conn)})
     elif art == "state":
@@ -239,7 +331,8 @@ def schema_diagram(kind: str) -> Dict[str, Any]:
         route = obj({"from":{"type":"string"},"to":{"type":"string"},"target":{"type":"string"}}, req=["from","to","target"], addl=False)
         props.update({"vpcs": arr(vpc), "subnets": arr(subnet), "routes": arr(route)})
 
-    return obj(props, req=["doc_type"], addl=False)
+    # instructions and language must be present
+    return obj(props, req=["doc_type","language","instructions"], addl=False)
 
 def schema_pat(kind: str) -> Dict[str, Any]:
     art = artifact_of(kind)
@@ -548,7 +641,15 @@ def family_of(kind: str) -> str:
     return category_of(kind)
 
 def prompt_for(kind: str) -> Dict[str, Any]:
-    return prompt_for_family(family_of(kind))
+    fam = family_of(kind)
+    if fam == "diagram":
+        base = prompt_for_family("diagram")
+        return {
+            **base,
+            "user_template": _diagram_user_template_for(kind),
+            "prompt_rev": (base.get("prompt_rev") or 1) + 1,
+        }
+    return prompt_for_family(fam)
 
 def schema_for(kind: str) -> Dict[str, Any]:
     fam = family_of(kind)
@@ -556,7 +657,6 @@ def schema_for(kind: str) -> Dict[str, Any]:
     return fn(kind) if fn else obj({"doc_type":{"const":doc_type_for(kind)}}, req=["doc_type"], addl=True)
 
 def identity_for(kind: str) -> Dict[str, Any]:
-    # Keep identity simple: use envelope name; specialized families can be refined later.
     return {"natural_key": ["name"], "summary_rule": "{{name}}", "category": family_of(kind)}
 
 def build_kind_doc(kind: str) -> Dict[str, Any]:

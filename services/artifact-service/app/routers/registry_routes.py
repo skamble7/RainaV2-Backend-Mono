@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from app.services.registry_service import KindRegistryService, SchemaValidationError
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.db.mongodb import get_db
@@ -95,16 +96,6 @@ async def api_validate(
     body: Dict[str, Any],
     db: AsyncIOMotorDatabase = Depends(get_db),
 ):
-    """
-    Validate a draft payload against a kind schema.
-
-    Body:
-    {
-      "kind": "cam.contract.api",
-      "version": "1.2.0"   // optional, defaults to latest
-      "data": { ... }      // required
-    }
-    """
     kind = body.get("kind")
     data = body.get("data")
     version = body.get("version")
@@ -115,9 +106,12 @@ async def api_validate(
     svc = KindRegistryService(db)
     try:
         await svc.validate_data(kind, data, version=version)
+    except SchemaValidationError as e:   # <-- catch the right error
+        raise HTTPException(status_code=422, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
-    return {"ok": True, "kind": kind, "version": version or "latest"}
+
+    return {"ok": True, "kind": kind, "version": version or "latest"}  # <-- never return None
 
 
 @router.get("/meta")

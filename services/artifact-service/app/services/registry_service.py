@@ -164,14 +164,18 @@ class _ValidatorCache:
     def __init__(self) -> None:
         self._compiled: Dict[str, Any] = {}
 
-    def key(self, kind_id: str, version: str) -> str:
-        return f"{kind_id}@{version}"
+    def key(self, kind_id: str, version: str, schema_hash: str) -> str:
+        # include schema digest so edits without version bumps still invalidate
+        return f"{kind_id}@{version}#{schema_hash}"
 
     def get(self, key: str) -> Optional[Any]:
         return self._compiled.get(key)
 
     def set(self, key: str, validator: Any) -> None:
         self._compiled[key] = validator
+
+    def clear(self) -> None:
+        self._compiled.clear()
 
 
 _validator_cache = _ValidatorCache()
@@ -186,7 +190,11 @@ def _compile_validator(kind_id: str, version: str, json_schema: Dict[str, Any]):
     """
     global _warned_no_validator
 
-    cache_key = _validator_cache.key(kind_id, version)
+    # robust cache key: include schema digest
+    schema_canonical = _canonical(json_schema)
+    schema_hash = _sha256(schema_canonical)
+    cache_key = _validator_cache.key(kind_id, version, schema_hash)
+
     cached = _validator_cache.get(cache_key)
     if cached:
         return cached
@@ -285,6 +293,31 @@ def _compute_category(kind_id: str, kind_doc: Optional[KindRegistryDoc]) -> str:
 
 
 # ─────────────────────────────────────────────────────────────
+# Diagram-specific normalization (pre-validate safety net)
+# ─────────────────────────────────────────────────────────────
+_DEPLOYMENT_KIND_MAP = {
+    "microservice": "server",
+    "service": "server",
+    "svc": "server",
+    "ms": "server",
+}
+
+def _normalize_diagram_payload(kind_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
+    """Make model output resilient to small taxonomy drifts for diagram kinds."""
+    out = json.loads(json.dumps(data))  # deep copy
+    if kind_id.endswith(".deployment"):
+        nodes = out.get("nodes") or []
+        for n in nodes:
+            # only if it's a simple string kind
+            k = n.get("kind")
+            if isinstance(k, str):
+                nk = _DEPLOYMENT_KIND_MAP.get(k.lower())
+                if nk:
+                    n["kind"] = nk
+    return out
+
+
+# ─────────────────────────────────────────────────────────────
 # Main Service
 # ─────────────────────────────────────────────────────────────
 class KindRegistryService:
@@ -322,6 +355,15 @@ class KindRegistryService:
 
         self._kinds = kinds
         self._aliases = aliases
+
+        # Invalidate compiled validators when registry etag changes
+        if self._etag and meta.etag != self._etag:
+            try:
+                _validator_cache.clear()
+                log.info("Validator cache cleared due to registry ETag change (old=%s, new=%s)", self._etag, meta.etag)
+            except Exception:
+                log.exception("Failed to clear validator cache on registry refresh")
+
         self._etag = meta.etag
 
     async def _get_kind_doc(self, kind_or_alias: str) -> Optional[KindRegistryDoc]:
@@ -400,6 +442,11 @@ class KindRegistryService:
                 out = _apply_adapter_dsl(out, ad["dsl"])
             # builtin adapter by id can be handled here later (whitelisted)
             # if ad_type == "builtin" and ad.get("ref"): call registered adapter
+
+        # 🔧 Safety net for diagram kinds (pre-validate taxonomy normalization)
+        if kd.id.startswith("cam.diagram."):
+            out = _normalize_diagram_payload(kd.id, out)
+
         return out
 
     async def migrate_data(
@@ -504,7 +551,7 @@ class KindRegistryService:
             kd.id, data, from_version=supplied_schema_version, to_version=kd.latest_schema_version
         )
 
-        # 3) adapters to canonicalize
+        # 3) adapters to canonicalize (+ diagram normalizer inside adapt_data)
         adapted = await self.adapt_data(kd.id, migrated, version=at_version)
 
         # 4) validate canonical data (may NO-OP if libs absent / schema missing)

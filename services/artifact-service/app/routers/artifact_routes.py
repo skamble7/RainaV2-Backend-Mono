@@ -163,7 +163,11 @@ async def upsert_batch(
                 "artifact_id": art.artifact_id,
                 "natural_key": art.natural_key,
                 "op": op,
-                "version": art.version
+                "version": art.version,
+                # helpful for debugging cache/version skews
+                "schema_version": env.get("schema_version"),
+                "kind": env.get("kind"),
+                "name": env.get("name"),
             })
             # emit per-item event (same semantics as single upsert)
             if op == "insert":
@@ -173,12 +177,28 @@ async def upsert_batch(
 
         except SchemaValidationError as e:
             counts["failed"] += 1
-            # 422-equivalent per item; bubble message for UI
-            results.append({"error": str(e), "kind": item.kind, "name": item.name})
+            logger.warning(
+                "schema_validation_failed",
+                extra=safe_extra({
+                    "workspace_id": workspace_id,
+                    "kind": getattr(item, "kind", None),
+                    "name": getattr(item, "name", None),
+                    "err": str(e),
+                }),
+            )
+            # Ensure error string is never empty in the summary
+            results.append({"error": str(e) or repr(e), "kind": item.kind, "name": item.name})
         except Exception as e:
-            logger.error("batch_upsert_failed_item", extra=safe_extra({"workspace_id": workspace_id, "err": str(e)}))
             counts["failed"] += 1
-            results.append({"error": str(e), "kind": item.kind, "name": item.name})
+            logger.exception(
+                "batch_upsert_failed_item",
+                extra=safe_extra({
+                    "workspace_id": workspace_id,
+                    "kind": getattr(item, "kind", None),
+                    "name": getattr(item, "name", None),
+                }),
+            )
+            results.append({"error": str(e) or repr(e), "kind": item.kind, "name": item.name})
 
     summary = {"counts": counts, "results": results}
     response.headers["X-Batch-Inserted"] = str(counts["insert"])
