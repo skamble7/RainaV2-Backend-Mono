@@ -8,12 +8,13 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.dal.kind_registry_dal import KINDS, upsert_kind, ensure_registry_indexes
 from app.seeds.seed_registry import ALL_KINDS, build_kind_doc
+from app.seeds.seed_categories import ensure_categories_seed  # NEW
 
 log = logging.getLogger(__name__)
 
 async def ensure_registry_seed(db: AsyncIOMotorDatabase) -> Dict[str, Any]:
     """
-    Idempotent seeding:
+    Idempotent seeding for kind registry (CAM kinds):
       - If the kind_registry collection is empty: seed all kinds.
       - If partially populated: seed only missing kinds.
       - If fully populated: no-op.
@@ -29,7 +30,6 @@ async def ensure_registry_seed(db: AsyncIOMotorDatabase) -> Dict[str, Any]:
     missing = [k for k in ALL_KINDS if k not in existing]
 
     if not existing and not missing:
-        # edge case: no kinds configured in ALL_KINDS (shouldn't happen)
         return {"mode": "skip", "existing": 0, "seeded": 0}
 
     if not existing:
@@ -47,3 +47,11 @@ async def ensure_registry_seed(db: AsyncIOMotorDatabase) -> Dict[str, Any]:
 
     log.info("Kind registry seed: mode=%s existing=%d seeded=%d", mode, len(existing), seeded)
     return {"mode": mode, "existing": len(existing), "seeded": seeded}
+
+async def ensure_all_seeds(db: AsyncIOMotorDatabase) -> Dict[str, Any]:
+    """
+    Seed both the KIND registry and the Category collection.
+    """
+    kinds_meta = await ensure_registry_seed(db)
+    cats_meta = await ensure_categories_seed(db)
+    return {"kinds": kinds_meta, "categories": cats_meta}
