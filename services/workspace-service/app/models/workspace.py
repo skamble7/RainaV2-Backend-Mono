@@ -21,6 +21,26 @@ class AccessLevel(str, Enum):
 Visibility = Dict[str, AccessLevel]
 
 
+class PlatformSection(BaseModel):
+    """
+    Thin, platform-scoped config with recommended keys.
+    Extra keys are allowed so each platform can evolve independently.
+    """
+    model_config = ConfigDict(extra="allow")
+
+    # Recommended common signals
+    context_ready: Optional[bool] = None              # Renova sets True after first successful learning run
+    last_successful_run_id: Optional[str] = None      # Run producing ready context
+    last_successful_run_at: Optional[datetime] = None
+
+    # Raina may reflect enablement decision (optional)
+    discovery_enabled: Optional[bool] = None
+    enabled_at: Optional[datetime] = None
+    enabled_by: Optional[str] = None                  # "renova" | "manual" | ...
+
+PlatformConfig = Dict[str, PlatformSection]  # platform_id -> section
+
+
 # --- Create/Update payloads ---------------------------------------------------
 
 class WorkspaceCreate(BaseModel):
@@ -42,6 +62,9 @@ class WorkspaceCreate(BaseModel):
         description="Per-platform ACL: {'renova': 'owner', 'raina': 'read', ...}",
     )
 
+    # Optional seed config (rarely used at creation time)
+    platform_config: Optional[PlatformConfig] = None
+
     @field_validator("origin_platform")
     @classmethod
     def _normalize_platform(cls, v: Optional[str]) -> Optional[str]:
@@ -62,6 +85,9 @@ class WorkspaceUpdate(BaseModel):
     # Allow thin visibility update
     visibility: Optional[Visibility] = None
 
+    # Optional full replace of the entire platform_config (use with care)
+    platform_config: Optional[PlatformConfig] = None
+
     @field_validator("visibility")
     @classmethod
     def _normalize_visibility_keys(cls, v: Optional[Visibility]) -> Optional[Visibility]:
@@ -75,7 +101,7 @@ class WorkspaceUpdate(BaseModel):
 class Workspace(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="allow")
 
-    id: str = Field(..., alias="_id")  # ← still the canonical workspace ID
+    id: str = Field(..., alias="_id")  # ← canonical workspace ID
     name: str
     description: Optional[str] = None
     created_by: Optional[str] = None
@@ -85,6 +111,9 @@ class Workspace(BaseModel):
     # NEW
     origin_platform: Optional[str] = None
     visibility: Visibility = Field(default_factory=dict)
+
+    # NEW: per-platform config/signals
+    platform_config: PlatformConfig = Field(default_factory=dict)
 
     @field_validator("origin_platform")
     @classmethod
