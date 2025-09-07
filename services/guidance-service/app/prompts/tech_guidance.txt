@@ -14,3 +14,4 @@ Required sections:
 
 For each section, produce concise markdown. Add measurable targets for NFRs.
 Reference source artifact IDs where relevant. Prefer actionable guidance for developers.
+`

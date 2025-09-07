@@ -12,9 +12,9 @@ from libs.raina_common.events import rk, Service
 
 log = logging.getLogger("app.events.workspace_consumer")
 
-_RK_CREATED = rk(settings.events_org, Service.WORKSPACE, "created")
-_RK_UPDATED = rk(settings.events_org, Service.WORKSPACE, "updated")
-_RK_DELETED = rk(settings.events_org, Service.WORKSPACE, "deleted")
+_RK_CREATED = rk(settings.platform_events_org, Service.WORKSPACE, "created")
+_RK_UPDATED = rk(settings.platform_events_org, Service.WORKSPACE, "updated")
+_RK_DELETED = rk(settings.platform_events_org, Service.WORKSPACE, "deleted")
 
 def _normalize(payload: dict) -> dict:
     """

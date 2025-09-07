@@ -12,8 +12,7 @@ class ContextEnvelope(TypedDict):
     artifacts: Dict[str, Any]  # read-only snapshot (can be {} for now)
 
 class AgentResult(TypedDict, total=False):
-    # Phase 1: we encode each output as an upsert-style patch to keep it future-proof.
-    patches: List[Dict[str, Any]]        # e.g., {"op":"upsert","path":"/artifacts","value":{...}}
+    patches: List[Dict[str, Any]]
     tasks: Optional[List[Dict[str, Any]]]
     adrs: Optional[List[Dict[str, Any]]]
     telemetry: Optional[List[Dict[str, Any]]]
@@ -22,7 +21,7 @@ class RainaAgent(Protocol):
     id: str
     provides: List[ArtifactSelector]
     requires: List[ArtifactSelector]
-    supports: Dict[str, List[str]]     # {"paradigms":[...], "styles":[...]}
+    supports: Dict[str, List[str]]
     version: str
 
     async def run(self, ctx: ContextEnvelope, params: Dict[str, Any]) -> AgentResult: ...

@@ -1,10 +1,10 @@
-# app/routes/workspace_routes.py
-from fastapi import APIRouter, Depends, HTTPException, Query
+# app/routers/workspace_routes.py
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from app.db.mongodb import get_db
 from app.dal.workspace_dal import (
     create_workspace, get_workspace, list_workspaces, update_workspace, delete_workspace,
 )
-from app.models.workspace import Workspace, WorkspaceCreate, WorkspaceUpdate
+from app.models.workspace import Workspace, WorkspaceCreate, WorkspaceUpdate, AccessLevel
 from app.events.rabbit import publish_event
 from app.config import settings
 
@@ -12,12 +12,29 @@ router = APIRouter(prefix="/workspace", tags=["workspace"])
 
 
 def rk(event: str) -> str:
-    """Build versioned routing key with org segment."""
+    """Build versioned routing key with org segment from settings."""
     return f"{settings.EVENTS_ORG}.workspace.{event}.v1"
 
 
+def _infer_origin_platform(request: Request, payload: WorkspaceCreate) -> str:
+    # Priority: explicit payload > header > default
+    if payload.origin_platform:
+        return payload.origin_platform.lower()
+    hdr = request.headers.get(settings.PLATFORM_HEADER)
+    if hdr:
+        return hdr.lower()
+    return settings.DEFAULT_ORIGIN_PLATFORM.lower()
+
+
 @router.post("/", response_model=Workspace, status_code=201)
-async def create_ws(payload: WorkspaceCreate, db=Depends(get_db)):
+async def create_ws(payload: WorkspaceCreate, request: Request, db=Depends(get_db)):
+    # Inject minimal defaults
+    origin_platform = _infer_origin_platform(request, payload)
+    if not payload.visibility:
+        payload.visibility = {origin_platform: AccessLevel.owner}
+    if not payload.origin_platform:
+        payload.origin_platform = origin_platform
+
     ws = await create_workspace(db, payload)
     await publish_event(rk("created"), ws.model_dump(by_alias=True))
     return ws

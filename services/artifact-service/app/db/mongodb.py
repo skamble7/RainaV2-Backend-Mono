@@ -1,3 +1,4 @@
+#services/artifact-service/app/db/mongodb.py
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 from ..config import settings
 

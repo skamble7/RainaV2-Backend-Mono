@@ -24,11 +24,9 @@ async def _ensure_exchange():
 
 
 async def publish_event(routing_key: str, payload: dict):
-    """
-    Publish a raw event with the given routing key.
-    """
+    """Publish a raw event with the given routing key."""
     ex = await _ensure_exchange()
-    body = orjson.dumps(payload)  # serializes datetimes RFC3339 + returns bytes
+    body = orjson.dumps(payload)
     msg = Message(body, content_type="application/json", delivery_mode=2)
     await ex.publish(msg, routing_key=routing_key)
 
@@ -37,10 +35,10 @@ async def publish_event_v1(event: str, payload: dict, org: str | None = None):
     """
     Publish an event using the canonical v1 routing key format:
     {org}.workspace.{event}.v1
-    Example: raina.workspace.created.v1
+    Example: platform.workspace.created.v1
     """
     ex = await _ensure_exchange()
-    routing_key = f"{org or getattr(settings, 'EVENTS_ORG', 'raina')}.workspace.{event}.v1"
+    routing_key = f"{org or getattr(settings, 'EVENTS_ORG', 'platform')}.workspace.{event}.v1"
     body = orjson.dumps(payload)
     msg = Message(body, content_type="application/json", delivery_mode=2)
     await ex.publish(msg, routing_key=routing_key)

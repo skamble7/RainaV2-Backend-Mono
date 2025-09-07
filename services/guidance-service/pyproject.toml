@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "guidance-service"
-version = "0.1.0"
+version = "0.2.0"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.111.0",
@@ -16,6 +16,8 @@ dependencies = [
   "markdown>=3.6",
   "weasyprint>=62.3",
   "openai>=1.40.0",
+  "motor>=3.5.0",            # <-- NEW (async MongoDB driver)
+  "pymongo>=4.8.0",          # <-- Optional explicit (Motor pins this, but safe to include)
 ]
 
 [tool.setuptools]

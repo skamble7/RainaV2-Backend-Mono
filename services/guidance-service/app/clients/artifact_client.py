@@ -13,10 +13,13 @@ class ArtifactClient:
     async def fetch_cam_artifacts(
         self, workspace_id: str, kinds: Optional[List[str]] = None
     ) -> List[Dict[str, Any]]:
+        """
+        Legacy/simple list of artifacts for a workspace.
+        Prefer fetch_workspace_with_artifacts() when you need workspace metadata and inputs.
+        """
         params = {}
         if kinds:
             params["kinds"] = ",".join(kinds)
-        # list artifacts for a workspace
         r = await self._client.get(f"{self.base_url}/artifact/{workspace_id}", params=params)
         r.raise_for_status()
         data = r.json()
@@ -29,19 +32,23 @@ class ArtifactClient:
         log.warning("Unexpected response shape from artifact list: %s", type(data))
         return []
 
-    async def persist_document(self, workspace_id: str, document: Dict[str, Any]) -> str:
-        # Persist as cam.document, with our structured guidance under `data`
-        payload = {
-            "kind": "cam.document",
-            "name": "Technical Architecture & Design Guidance",
-            "data": document,   # document already has doc_type="tech_guidance"
-        }
-        r = await self._client.post(f"{self.base_url}/artifact/{workspace_id}", json=payload)
+    async def fetch_workspace_with_artifacts(
+        self, workspace_id: str, include_deleted: bool = False
+    ) -> Dict[str, Any]:
+        """
+        Fetches the parent bundle that includes:
+          - workspace metadata under 'workspace'
+          - artifacts under 'artifacts'
+          - inputs_baseline (e.g., avc/fss/pss) and more
+        Endpoint example:
+          GET /artifact/{workspace_id}/parent?include_deleted=false
+        """
+        url = f"{self.base_url}/artifact/{workspace_id}/parent"
+        params = {"include_deleted": str(include_deleted).lower()}
+        r = await self._client.get(url, params=params)
         r.raise_for_status()
         body = r.json()
-        return body.get("id") or body.get("_id") or body.get("artifact_id")
-
-    async def get_artifact(self, workspace_id: str, artifact_id: str) -> Dict[str, Any]:
-        r = await self._client.get(f"{self.base_url}/artifact/{workspace_id}/{artifact_id}")
-        r.raise_for_status()
-        return r.json()
+        if not isinstance(body, dict):
+            log.warning("Unexpected response shape from parent bundle: %s", type(body))
+            return {}
+        return body

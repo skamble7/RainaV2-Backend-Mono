@@ -1,3 +1,4 @@
+# services/workspace-service/app/db/mongodb.py
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 from app.config import settings
 

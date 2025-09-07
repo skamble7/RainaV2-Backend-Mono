@@ -1,3 +1,4 @@
+# services/discovery-service/app/models/discovery.py
 from __future__ import annotations
 
 from datetime import datetime
@@ -67,7 +68,7 @@ class StartDiscoveryRequest(BaseModel):
     inputs: DiscoveryInputs
     options: Optional[DiscoveryOptions] = None
 
-    # NEW: optional friendly metadata for the run
+    # Friendly metadata for the run
     title: Optional[str] = Field(default=None, max_length=200)
     description: Optional[str] = Field(default=None, max_length=2000)
 
@@ -103,19 +104,39 @@ class InputsDiff(BaseModel):
 class ArtifactsDiff(BaseModel):
     """
     Diff result by natural key (not IDs), for easier UI grouping:
-      - new: present in run, not in baseline
-      - updated: present in both, but different artifact instance (id/fingerprint)
-      - unchanged: present in both, same artifact instance
-      - retired: present in baseline, not in run
+      - new: present in this run, not in prior snapshot for this workspace
+      - updated: present in both, but with changed content/fingerprint
+      - unchanged: present in both, same content/fingerprint
+      - retired: present previously, not produced in this run
     """
     new: List[str] = []
     updated: List[str] = []
     unchanged: List[str] = []
     retired: List[str] = []
-    counts: Dict[str, int] = Field(default_factory=dict)
 
 class RunDeltas(BaseModel):
+    """
+    Aggregated counts derived from ArtifactsDiff.
+    Keys SHOULD be: new, updated, unchanged, retired.
+    (No 'deleted' key.)
+    """
     counts: Dict[str, int] = Field(default_factory=dict)
+
+class ValidationIssue(BaseModel):
+    artifact_id: str
+    severity: Literal["low", "medium", "high"]
+    message: str
+
+class RunSummary(BaseModel):
+    """
+    Minimal, non-redundant summary of execution.
+    (IDs, title/description, etc. live on DiscoveryRun itself.)
+    """
+    validations: List[ValidationIssue] = []
+    logs: List[str] = []
+    started_at: datetime
+    completed_at: Optional[datetime] = None
+    duration_s: Optional[float] = None
 
 # ─────────────────────────────────────────────────────────────
 # Run persistence shape
@@ -128,7 +149,7 @@ class DiscoveryRun(BaseModel):
     inputs: DiscoveryInputs
     options: DiscoveryOptions = Field(default_factory=DiscoveryOptions)
 
-    # NEW: friendly metadata for the run (non-mandatory)
+    # Friendly metadata for the run (non-mandatory)
     title: Optional[str] = Field(default=None, max_length=200)
     description: Optional[str] = Field(default=None, max_length=2000)
 
@@ -136,14 +157,19 @@ class DiscoveryRun(BaseModel):
     input_fingerprint: Optional[str] = None       # sha256 over canonical(inputs)
     input_diff: Optional[InputsDiff] = None
 
-    # Run intent + artifact summary
-    strategy: Literal["baseline", "delta", "rebuild"] = "delta"
+    # Run intent (auto-detected and persisted)
+    strategy: Literal["baseline", "delta"] = "delta"
+
+    # All artifacts produced in this run (full objects)
+    run_artifacts: List[Dict[str, Any]] = Field(default_factory=list)
+
+    # Classification vs prior baseline snapshot
     artifacts_diff: Optional[ArtifactsDiff] = None
     deltas: Optional[RunDeltas] = None
 
     status: Literal["created", "running", "completed", "failed", "aborted"] = "created"
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
-    result_summary: Optional[Dict[str, Any]] = None
-    result_artifacts_ref: Optional[str] = None
-    error: Optional[str] = None
+
+    # Minimal, non-redundant summary
+    run_summary: Optional[RunSummary] = None

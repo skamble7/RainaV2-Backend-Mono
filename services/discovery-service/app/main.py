@@ -1,15 +1,12 @@
-# services/discovery-service/app/main.py
-
 from __future__ import annotations
 
 import json
 import logging
 import httpx
-import asyncio
 import pymongo
-from uuid import uuid4
+from uuid import uuid4, UUID as _UUID
 from datetime import datetime, timezone
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Dict, Any, List, Literal
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, Query
 from fastapi.responses import ORJSONResponse
@@ -19,12 +16,11 @@ from app.config import settings
 from app.logging import setup_logging
 from app.models.discovery import (
     StartDiscoveryRequest,
-    DiscoveryRun,
     InputsDiff,
     ArtifactsDiff,
     RunDeltas,
+    RunSummary,
 )
-from app.models.state import DiscoveryState
 from app.graphs.discovery_graph import build_graph
 from app.infra.rabbit import publish_event_v1
 
@@ -41,7 +37,7 @@ from app.db.discovery_runs import (
 from app.clients.artifact_service import (
     set_inputs_baseline,
     get_workspace_parent,
-    get_artifact,
+    get_workspace_with_artifacts,
     get_artifacts_by_ids,
 )
 
@@ -54,9 +50,9 @@ from app.middleware.correlation import (
 )
 
 _RESERVED = {
-    "name","msg","args","levelname","levelno","pathname","filename","module",
-    "exc_info","exc_text","stack_info","lineno","funcName","created","msecs",
-    "relativeCreated","thread","threadName","process","processName","message","asctime"
+    "name", "msg", "args", "levelname", "levelno", "pathname", "filename", "module",
+    "exc_info", "exc_text", "stack_info", "lineno", "funcName", "created", "msecs",
+    "relativeCreated", "thread", "threadName", "process", "processName", "message", "asctime"
 }
 def safe_extra(extra: dict) -> dict:
     out = {}
@@ -76,8 +72,10 @@ def _corr_headers() -> dict:
     try:
         rid = request_id_var.get()
         cid = correlation_id_var.get()
-        if rid: hdrs["x-request-id"] = rid
-        if cid: hdrs["x-correlation-id"] = cid
+        if rid:
+            hdrs["x-request-id"] = rid
+        if cid:
+            hdrs["x-correlation-id"] = cid
     except Exception:
         pass
     return hdrs
@@ -91,7 +89,10 @@ def get_db():
 def _startup():
     db = get_db()
     init_indexes(db)
-    logger.info("Indexes initialized for discovery_runs", extra=safe_extra({"service": settings.SERVICE_NAME}))
+    logger.info(
+        "Indexes initialized for discovery_runs",
+        extra=safe_extra({"service": settings.SERVICE_NAME}),
+    )
 
 # ---- health -------------------------------------------------------------
 @app.get("/health")
@@ -135,7 +136,7 @@ def _inputs_diff(baseline: Dict[str, Any], candidate: Dict[str, Any]) -> InputsD
     for gid in (c_goals.keys() & b_goals.keys()):
         changed = []
         for fld in ("text", "metric"):
-            if (c_goals[gid].get(fld) != b_goals[gid].get(fld)):
+            if c_goals[gid].get(fld) != b_goals[gid].get(fld):
                 changed.append(fld)
         if changed:
             updated_goals.append({"id": gid, "fields": changed})
@@ -190,115 +191,96 @@ async def _fetch_workspace_baseline_inputs(workspace_id: str) -> Dict[str, Any]:
         return parent.get("inputs_baseline") or {}
 
 # ─────────────────────────────────────────────────────────────
-# Artifact diffing helpers
+# Helpers for strategy detection and diffs
 # ─────────────────────────────────────────────────────────────
-def _nk(a: Dict[str, Any]) -> str:
-    return (a.get("natural_key") or f"{a.get('kind')}:{a.get('name')}").lower()
+async def _detect_strategy(workspace_id: str) -> Literal["baseline", "delta"]:
+    """
+    First run for a workspace is 'baseline' (no artifacts yet), else 'delta'.
+    """
+    try:
+        doc = await get_workspace_with_artifacts(workspace_id, include_deleted=False)
+        arts = (doc or {}).get("artifacts") or []
+        return "baseline" if len(arts) == 0 else "delta"
+    except Exception:
+        return "baseline"
 
-def _counts(diff: ArtifactsDiff) -> Dict[str, int]:
+def _nk(a: Dict[str, Any]) -> str:
+    return (a.get("natural_key") or f"{a.get('kind')}:{a.get('name')}").lower().strip()
+
+def _counts_from_diff(diff: ArtifactsDiff) -> Dict[str, int]:
     return {
         "new": len(diff.new),
         "updated": len(diff.updated),
         "unchanged": len(diff.unchanged),
         "retired": len(diff.retired),
-        "deleted": 0,  # reserved for future hard-deletes
+        "deleted": 0,
     }
 
-def _select_baseline_run_id(db, workspace_id: str, fallback_exclude: Optional[str] = None) -> Optional[str]:
+async def _compute_artifacts_diff_for_run(
+    db,
+    workspace_id: str,
+    run_id: str,
+    run_summary: Dict[str, Any] | RunSummary,
+) -> ArtifactsDiff:
     """
-    Strategy:
-      1) If artifact-service parent says last_promoted_run_id -> use it
-      2) Else earliest completed 'baseline' run
-      3) Else earliest completed run (excluding current if provided)
+    Compute artifacts diff using baseline (parent workspace) + artifact IDs saved in the run summary.
     """
+    # Right-side (current run) artifact IDs
+    if isinstance(run_summary, dict):
+        right_ids: List[str] = list(run_summary.get("artifact_ids") or [])
+    else:
+        right_ids = list(run_summary.artifact_ids or [])
+
+    # If no baseline, everything is new
+    base_run_id = None
     try:
-        # Best-effort call to artifact-service for last_promoted_run_id
-        parent = asyncio.get_event_loop().run_until_complete(get_workspace_parent(workspace_id))
-        lp = parent.get("last_promoted_run_id")
-        if lp:
-            return str(lp)
+        parent = await get_workspace_parent(workspace_id)
+        base_run_id = parent.get("last_promoted_run_id")
     except Exception:
         pass
 
-    coll = db["discovery_runs"]
-    # 2) earliest completed baseline
-    doc = coll.find_one(
-        {"workspace_id": workspace_id, "status": "completed", "strategy": "baseline"},
-        sort=[("created_at", 1)],
-        projection={"run_id": 1},
-    )
-    if doc and doc.get("run_id"):
-        rid = str(doc["run_id"])
-        if fallback_exclude and rid == fallback_exclude:
-            doc = None
-        else:
-            return rid
-
-    # 3) earliest completed (not the current run)
-    filt = {"workspace_id": workspace_id, "status": "completed"}
-    if fallback_exclude:
-        filt["run_id"] = {"$ne": fallback_exclude}
-    doc = coll.find_one(filt, sort=[("created_at", 1)], projection={"run_id": 1})
-    return str(doc["run_id"]) if doc and doc.get("run_id") else None
-
-async def _compute_artifacts_diff_for_run(db, workspace_id: str, run_id: str, run_summary: Dict[str, Any]) -> ArtifactsDiff:
-    """
-    Compute diff between this run (right) and the chosen baseline run (left).
-    Returns and also persists into the run document.
-    """
-    # Figure out baseline run to compare with
-    base_run_id = _select_baseline_run_id(db, workspace_id, fallback_exclude=run_id)
-
-    # Collect artifact ids for right (current) and left (baseline)
-    right_ids: List[str] = run_summary.get("artifact_ids", []) or []
-
-    left_ids: List[str] = []
-    if base_run_id:
-        base = get_by_run_id(db, UUID4(base_run_id))
-        if base and base.result_summary:
-            left_ids = base.result_summary.get("artifact_ids", []) or []
-
-    # Edge case: no baseline → everything new
-    if not left_ids:
-        right_docs = await get_artifacts_by_ids(workspace_id, right_ids)
-        diff = ArtifactsDiff(
-            new=sorted({_nk(a) for a in right_docs}),
-            updated=[],
-            unchanged=[],
-            retired=[],
-        )
-        diff.counts = _counts(diff)
+    right_docs = await get_artifacts_by_ids(workspace_id, right_ids or [])
+    if not base_run_id:
+        new_nks = sorted({_nk(a) for a in right_docs if isinstance(a, dict)})
+        diff = ArtifactsDiff(new=new_nks, updated=[], unchanged=[], retired=[])
+        diff.counts = _counts_from_diff(diff)
         return diff
 
-    # Fetch both sides from artifact-service
-    left_docs = await get_artifacts_by_ids(workspace_id, left_ids)
-    right_docs = await get_artifacts_by_ids(workspace_id, right_ids)
+    # Load baseline run’s artifact IDs from DB
+    base = get_by_run_id(db, _UUID(str(base_run_id)))
+    left_ids: List[str] = []
+    if base and base.run_summary:
+        left_ids = (
+            base.run_summary.artifact_ids
+            if isinstance(base.run_summary, RunSummary)
+            else (base.run_summary or {}).get("artifact_ids", [])
+        ) or []
 
-    L = { _nk(a): a for a in left_docs }
-    R = { _nk(a): a for a in right_docs }
+    left_docs = await get_artifacts_by_ids(workspace_id, left_ids or [])
+
+    L = {_nk(a): a for a in left_docs if isinstance(a, dict)}
+    R = {_nk(a): a for a in right_docs if isinstance(a, dict)}
 
     new_keys: List[str] = []
     upd_keys: List[str] = []
     same_keys: List[str] = []
     ret_keys: List[str] = []
 
-    # New / Updated / Unchanged
+    def _id_and_fp(d: Dict[str, Any]) -> tuple[str, str]:
+        return (str(d.get("artifact_id") or d.get("_id") or ""), str(d.get("fingerprint") or ""))
+
     for nk, r in R.items():
         l = L.get(nk)
         if not l:
             new_keys.append(nk)
         else:
-            # If artifact_id/fingerprint differs -> updated, else unchanged
-            lid = str(l.get("artifact_id") or "")
-            rid = str(r.get("artifact_id") or "")
-            lfp = l.get("fingerprint")
-            rfp = r.get("fingerprint")
+            lid, lfp = _id_and_fp(l)
+            rid, rfp = _id_and_fp(r)
             if (lid and rid and lid == rid) or (lfp and rfp and lfp == rfp):
                 same_keys.append(nk)
             else:
                 upd_keys.append(nk)
 
-    # Retired
     for nk in L.keys():
         if nk not in R:
             ret_keys.append(nk)
@@ -309,7 +291,7 @@ async def _compute_artifacts_diff_for_run(db, workspace_id: str, run_id: str, ru
         unchanged=sorted(same_keys),
         retired=sorted(ret_keys),
     )
-    diff.counts = _counts(diff)
+    diff.counts = _counts_from_diff(diff)
     return diff
 
 async def _persist_run_diff(db, run_id: UUID4, diff: ArtifactsDiff) -> None:
@@ -326,17 +308,19 @@ async def _persist_run_diff(db, run_id: UUID4, diff: ArtifactsDiff) -> None:
     )
 
 # ---- background worker -------------------------------------------------
-async def _run_discovery(req: StartDiscoveryRequest, run_id: UUID4):
+async def _run_discovery(req: StartDiscoveryRequest, run_id: UUID4, *, strategy: Literal["baseline", "delta"]):
     start_ts = datetime.now(timezone.utc)
     db = get_db()
     run_graph = build_graph()
     model_id = (req.options.model if req.options else None) or settings.MODEL_ID
 
-    logger.info("discovery.options.received",
-        extra=safe_extra({"options": (req.options.model_dump(by_alias=True) if req.options else {})})
+    logger.info(
+        "discovery.options.received",
+        extra=safe_extra({"options": (req.options.model_dump(by_alias=True) if req.options else {})}),
     )
 
-    state: DiscoveryState = {
+    # include strategy in state so classify_node knows mode
+    state = {
         "workspace_id": str(req.workspace_id),
         "playbook_id": req.playbook_id,
         "model_id": model_id,
@@ -345,22 +329,25 @@ async def _run_discovery(req: StartDiscoveryRequest, run_id: UUID4):
         "artifacts": [],
         "logs": [],
         "errors": [],
+        "strategy": strategy,
         "context": {
             "dry_run": bool(req.options and req.options.dry_run),
             "run_id": str(run_id),
         },
     }
 
-    # NEW: Capture initial baseline inputs in artifact-service if absent
+    # Capture inputs baseline once (no-op if already set)
     try:
+        inputs_dict = req.inputs.model_dump()
         await set_inputs_baseline(
             workspace_id=str(req.workspace_id),
-            inputs=req.inputs.model_dump(),
-            run_id=str(run_id),
-            if_absent_only=True,     # do not override an existing baseline
+            avc=inputs_dict.get("avc") or {},
+            fss=inputs_dict.get("fss") or {},
+            pss=inputs_dict.get("pss") or {},
+            if_absent_only=True,
         )
     except Exception as e:
-        # Non-fatal: log & continue so discovery still runs
+        # non-fatal
         state.setdefault("logs", []).append(f"inputs_baseline capture skipped: {e}")
 
     try:
@@ -368,7 +355,6 @@ async def _run_discovery(req: StartDiscoveryRequest, run_id: UUID4):
     except Exception:
         logger.exception("Failed to set run status to running", extra=safe_extra({"run_id": str(run_id)}))
 
-    # Include title/description in the STARTED event if present
     publish_event_v1(
         org=settings.EVENTS_ORG,
         event="started",
@@ -380,6 +366,7 @@ async def _run_discovery(req: StartDiscoveryRequest, run_id: UUID4):
             "received_at": start_ts.isoformat(),
             "title": getattr(req, "title", None),
             "description": getattr(req, "description", None),
+            "strategy": strategy,
         },
         headers=_corr_headers(),
     )
@@ -387,32 +374,79 @@ async def _run_discovery(req: StartDiscoveryRequest, run_id: UUID4):
     try:
         result = await run_graph.ainvoke(state)
         completed_at = datetime.now(timezone.utc)
-        summary = {
-            "run_id": str(run_id),
-            "workspace_id": str(req.workspace_id),
-            "playbook_id": str(req.playbook_id),
-            "artifact_ids": result.get("context", {}).get("artifact_ids", []),
-            "validations": result.get("validations", []),
-            "logs": result.get("logs", []),
-            "started_at": start_ts.isoformat(),
-            "completed_at": completed_at.isoformat(),
-            "duration_s": (completed_at - start_ts).total_seconds(),
-            # Echo title/description for consumers that want it later
-            "title": getattr(req, "title", None),
-            "description": getattr(req, "description", None),
+
+        # Use the graph’s classification results if present
+        artifacts_diff_from_graph = result.get("artifacts_diff") or {}
+        deltas_from_graph = result.get("deltas") or {}
+        counts = (
+            artifacts_diff_from_graph.get("counts")
+            or deltas_from_graph.get("counts")
+            or {}
+        )
+        counts = {
+            "new": int(counts.get("new", 0)),
+            "updated": int(counts.get("updated", 0)),
+            "unchanged": int(counts.get("unchanged", 0)),
+            "retired": int(counts.get("retired", 0)),
+            "deleted": int(counts.get("deleted", 0)),
         }
 
-        # First, mark the run completed and store summary
-        set_status(db, run_id, "completed", result_summary=summary, result_artifacts_ref=None)
+        # ✅ Ensure we never save a counts-only shell if the graph produced arrays
+        has_arrays = any(
+            isinstance(artifacts_diff_from_graph.get(k), list) and artifacts_diff_from_graph.get(k)
+            for k in ("new", "updated", "unchanged", "retired")
+        )
+        artifacts_diff_to_save = dict(artifacts_diff_from_graph) if artifacts_diff_from_graph else {}
+        if not artifacts_diff_to_save:
+            # still keep a minimal structure; arrays may be empty if nothing generated
+            artifacts_diff_to_save = {"new": [], "updated": [], "unchanged": [], "retired": []}
+        if "counts" not in artifacts_diff_to_save:
+            artifacts_diff_to_save["counts"] = counts
 
-        # Compute & persist artifacts diff (drives delta pills + diff viewer)
+        # ✅ Bubble up run_artifacts so the run doc can show what was generated this run
+        run_artifacts_to_save = list(result.get("run_artifacts") or [])
+
+        summary = RunSummary(
+            run_id=run_id,
+            workspace_id=req.workspace_id,
+            playbook_id=req.playbook_id,
+            artifact_ids=list(result.get("context", {}).get("artifact_ids", [])),
+            validations=[*result.get("validations", [])],
+            logs=list(result.get("logs", [])),
+            started_at=start_ts,
+            completed_at=completed_at,
+            duration_s=(completed_at - start_ts).total_seconds(),
+            title=getattr(req, "title", None),
+            description=getattr(req, "description", None),
+        )
+
+        set_status(
+            db,
+            run_id,
+            "completed",
+            run_summary=summary.model_dump(mode="json"),
+            result_artifacts_ref=None,
+            artifacts_diff=artifacts_diff_to_save,          # ✅ arrays + counts
+            deltas={"counts": artifacts_diff_to_save["counts"]},
+            run_artifacts=run_artifacts_to_save,            # ✅ optional but useful
+        )
+
+        # Then compute authoritative baseline-vs-run diff and persist
         try:
             diff = await _compute_artifacts_diff_for_run(db, str(req.workspace_id), str(run_id), summary)
             await _persist_run_diff(db, run_id, diff)
         except Exception as diff_err:
-            logger.exception("artifacts.diff.compute_failed", extra=safe_extra({"run_id": str(run_id), "error": str(diff_err)}))
+            logger.exception(
+                "artifacts.diff.compute_failed",
+                extra=safe_extra({"run_id": str(run_id), "error": str(diff_err)}),
+            )
 
-        publish_event_v1(org=settings.EVENTS_ORG, event="completed", payload=summary, headers=_corr_headers())
+        publish_event_v1(
+            org=settings.EVENTS_ORG,
+            event="completed",
+            payload=summary.model_dump(mode="json"),
+            headers=_corr_headers(),
+        )
 
     except Exception as e:
         logger.exception("discovery_failed", extra=safe_extra({"run_id": str(run_id)}))
@@ -427,6 +461,7 @@ async def _run_discovery(req: StartDiscoveryRequest, run_id: UUID4):
             "failed_at": datetime.now(timezone.utc).isoformat(),
             "title": getattr(req, "title", None),
             "description": getattr(req, "description", None),
+            "strategy": strategy,
         }
         try:
             set_status(get_db(), run_id, "failed", error=str(e))
@@ -446,6 +481,9 @@ async def discover(workspace_id: str, req: StartDiscoveryRequest, bg: Background
     input_fingerprint = _sha256(_canonical(candidate_inputs))
     input_diff = _inputs_diff(baseline_inputs, candidate_inputs)
 
+    # Decide strategy up-front (first run becomes 'baseline')
+    strategy = await _detect_strategy(workspace_id)
+
     run_id: UUID4 = UUID4(str(uuid4()))
     _ = create_discovery_run(
         db,
@@ -453,10 +491,10 @@ async def discover(workspace_id: str, req: StartDiscoveryRequest, bg: Background
         run_id,
         input_fingerprint=input_fingerprint,
         input_diff=input_diff,
-        strategy="delta",
+        strategy=strategy,
     )
 
-    bg.add_task(_run_discovery, req, run_id)
+    bg.add_task(_run_discovery, req, run_id, strategy=strategy)
 
     return {
         "accepted": True,
@@ -467,12 +505,12 @@ async def discover(workspace_id: str, req: StartDiscoveryRequest, bg: Background
         "dry_run": bool(req.options and req.options.dry_run),
         "title": getattr(req, "title", None),
         "description": getattr(req, "description", None),
+        "strategy": strategy,
         "request_id": request_id_var.get(),
         "correlation_id": correlation_id_var.get(),
         "message": "Discovery started; query status with GET /runs/{run_id} or list via GET /runs?workspace_id=...",
     }
 
-# NOTE: We drop response_model enforcement so we can enrich payloads with 'deltas'
 @app.get("/runs/{run_id}")
 async def get_run(run_id: UUID4, include_ids: bool = Query(default=False), db=Depends(get_db)):
     run = get_by_run_id(db, run_id)
@@ -480,17 +518,16 @@ async def get_run(run_id: UUID4, include_ids: bool = Query(default=False), db=De
         raise HTTPException(status_code=404, detail="Discovery run not found.")
     doc = run.model_dump(mode="json")
 
-    # If diff wasn't persisted (legacy runs), compute on the fly and persist
+    # If diff wasn't persisted (legacy runs), compute and persist
     try:
-        if not doc.get("artifacts_diff") and run.result_summary:
+        if not doc.get("artifacts_diff") and run.run_summary:
             diff = await _compute_artifacts_diff_for_run(
-                db, doc["workspace_id"], doc["run_id"], run.result_summary
+                db, doc["workspace_id"], doc["run_id"], run.run_summary
             )
             await _persist_run_diff(db, run_id, diff)
             doc["artifacts_diff"] = diff.model_dump(mode="json")
             doc["deltas"] = RunDeltas(counts=diff.counts).model_dump(mode="json")
     except Exception:
-        # best-effort enrichment
         pass
 
     return doc
@@ -513,9 +550,9 @@ async def list_runs(
                     pass
                 elif dct.get("artifacts_diff", {}).get("counts"):
                     dct["deltas"] = {"counts": dct["artifacts_diff"]["counts"]}
-                elif r.result_summary:
+                elif r.run_summary:
                     diff = await _compute_artifacts_diff_for_run(
-                        db, dct["workspace_id"], dct["run_id"], r.result_summary
+                        db, dct["workspace_id"], dct["run_id"], r.run_summary
                     )
                     await _persist_run_diff(db, r.run_id, diff)
                     dct["deltas"] = {"counts": diff.counts}

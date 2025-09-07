@@ -1,3 +1,4 @@
+#services/discovery-service/app/agents/validate_node.py
 from pathlib import Path
 from app.llms.registry import get_provider
 import json, logging
@@ -15,8 +16,8 @@ async def validate_node(state: DiscoveryState) -> DiscoveryState:
         {"role":"user", "content": json.dumps({"inputs": state["inputs"], "artifacts": state["artifacts"]})}
     ]
     try:
-        content = await provider.chat_json(messages)  # <-- force JSON
-        result = json.loads(content)
+        content = await provider.chat_json(messages)
+        result = json.loads(content) if isinstance(content, str) else content
     except Exception as e:
         logger.exception("validate_node_parse_error")
         result = {"issues":[{"severity":"info","message":f"Validator non-JSON: {e}"}]}

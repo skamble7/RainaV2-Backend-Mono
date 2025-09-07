@@ -1,3 +1,4 @@
+#services/workspace-service/app/main.py
 import logging
 import uvicorn
 from fastapi import FastAPI

@@ -3,7 +3,7 @@ from typing import List, Optional, Dict, Any
 
 class GuidanceGenerateRequest(BaseModel):
     workspace_id: str
-    artifact_kinds: Optional[List[str]] = None   # e.g., ["service_contract","context_map","erd","sequence"]
+    artifact_kinds: Optional[List[str]] = None
     sections: Optional[List[str]] = None
     model_id: Optional[str] = None
     temperature: Optional[float] = None
@@ -30,9 +30,23 @@ class GuidanceDocument(BaseModel):
     observability: Optional[GuidanceSection] = None
     ops_runbooks: Optional[GuidanceSection] = None
     adrs: Optional[GuidanceSection] = None
-    metadata: Dict[str, Any] = Field(default_factory=dict)   # source artifact IDs, model info
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
 class GuidanceGenerateResponse(BaseModel):
     document: GuidanceDocument
-    artifact_id: Optional[str] = None
-    pdf_path: Optional[str] = None
+    workspace_name: str
+    version: int
+    filename_md: Optional[str] = None
+    filename_pdf: Optional[str] = None
+    file_path_md: Optional[str] = None
+    file_path_pdf: Optional[str] = None
+
+class GuidanceListItem(BaseModel):
+    workspace_id: str
+    workspace_name: str
+    version: int
+    filename_md: str
+    filename_pdf: Optional[str] = None
+    created_at: str
+    sections: List[str]
+    meta: Dict[str, Any] = {}

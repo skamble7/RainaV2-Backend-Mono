@@ -1,3 +1,4 @@
+#services/artifact-service/app/config.py
 import os
 from pydantic import BaseModel
 
@@ -17,9 +18,10 @@ class Settings(BaseModel):
     # Events: org/tenant segment for versioned routing keys
     # Final RK shape => <events_org>.<service>.<event>.v1
     events_org: str = os.getenv("EVENTS_ORG", "raina")
+    platform_events_org: str = os.getenv("PLATFORM_EVENTS_ORG", "platform")
 
     # Consumer queue for workspace events (configurable; durable named queue)
     # If you want an anonymous/auto-delete queue, set this to "".
-    consumer_queue_workspace: str = os.getenv("CONSUMER_QUEUE_WORKSPACE", "artifact-service.workspace.v1")
+    consumer_queue_workspace: str = os.getenv("CONSUMER_QUEUE_WORKSPACE", "platform.workspace.v1")
 
 settings = Settings()

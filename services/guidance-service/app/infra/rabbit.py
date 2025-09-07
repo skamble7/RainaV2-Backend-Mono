@@ -18,7 +18,6 @@ class RabbitPublisher:
     """
     Async publisher that emits ONLY versioned routing keys:
         <org>.guidance.<event>.<version>
-    Reuses a robust connection + channel + exchange.
     """
     def __init__(self, url: Optional[str] = None, exchange_name: Optional[str] = None):
         self.url = url or settings.RABBITMQ_URL
@@ -52,10 +51,6 @@ class RabbitPublisher:
         headers: Optional[Dict[str, str]] = None,
         version: str = Version.V1.value,
     ) -> None:
-        """
-        Publish a versioned Guidance event as persistent JSON.
-        Routing key: <org>.guidance.<event>.<version>
-        """
         await self._ensure()
         assert self._exchange is not None
 
@@ -77,14 +72,11 @@ class RabbitPublisher:
             if self._conn and not self._conn.is_closed:
                 await self._conn.close()
 
-# Module-level singleton for convenience
 publisher = RabbitPublisher()
 
-# Backwards-incompatible: remove legacy API if present anywhere
 async def publish(routing_key: str, message: dict):  # pragma: no cover
     raise RuntimeError("Use publish_v1(event=..., payload=..., org=...) instead.")
 
-# Convenience wrapper matching the rest of Raina services
 async def publish_event_v1(
     *,
     event: str,
