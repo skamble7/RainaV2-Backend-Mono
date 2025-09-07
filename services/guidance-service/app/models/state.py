@@ -11,3 +11,4 @@ class GuidanceState(TypedDict, total=False):
     structured: Dict[str, Any]
     validation: Dict[str, Any]
     persisted_artifact_id: str
+    

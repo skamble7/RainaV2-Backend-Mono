@@ -1,4 +1,3 @@
-# app/middleware/correlation.py
 import uuid, logging
 import contextvars
 from starlette.middleware.base import BaseHTTPMiddleware

@@ -1,3 +1,4 @@
+# services/capability-service/app/main.py
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import logging
@@ -8,6 +9,9 @@ from .db.mongodb import get_db
 from .dal.capability_dal import ensure_indexes
 from .config import settings
 from .middleware.correlation import CorrelationIdMiddleware, CorrelationIdFilter
+
+# NEW: import seeder
+from .seeds.capabilities_seed import run_capabilities_seed
 
 # Configure structured/central logging first
 configure_logging()
@@ -24,10 +28,10 @@ app.add_middleware(
     expose_headers=["x-request-id", "x-correlation-id"],
 )
 
-# Correlation-ID middleware (adds x-request-id/x-correlation-id to context + response)
+# Correlation-ID middleware
 app.add_middleware(CorrelationIdMiddleware)
 
-# Attach correlation filter to key loggers so every line carries IDs
+# Attach correlation filter
 _corr_filter = CorrelationIdFilter()
 for logger_name in ("", "uvicorn.access", "uvicorn.error", "app"):
     logging.getLogger(logger_name).addFilter(_corr_filter)
@@ -42,6 +46,8 @@ async def health():
 async def on_startup():
     db = await get_db()
     await ensure_indexes(db)
+    # Seed capabilities if needed (idempotent)
+    await run_capabilities_seed(db)
 
 # Routes
 app.include_router(capability_router)

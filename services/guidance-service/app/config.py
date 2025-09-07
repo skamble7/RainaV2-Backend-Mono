@@ -1,6 +1,5 @@
 # app/config.py
 from typing import Optional, List
-from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
@@ -9,11 +8,17 @@ class Settings(BaseSettings):
 
     # External services
     ARTIFACT_SERVICE_URL: str = "http://artifact-service:8011"
+    WORKSPACE_SERVICE_URL: str = "http://workspace-service:8010"  # kept for compatibility
+
+    # MongoDB
+    MONGODB_URI: str = "mongodb://localhost:27017"
+    MONGODB_DB: str = "raina"
+    GUIDANCE_COLLECTION: str = "guidance_documents"
 
     # Messaging
     RABBITMQ_URL: str = "amqp://guest:guest@rabbitmq:5672/%2F"
-    RABBITMQ_EXCHANGE: str = "raina.events"            # topic exchange
-    EVENTS_ORG: str = "raina"                          # org/tenant segment for versioned keys
+    RABBITMQ_EXCHANGE: str = "raina.events"
+    EVENTS_ORG: str = "raina"
 
     # LLM config
     LLM_PROVIDER: str = "openai"
@@ -21,7 +26,7 @@ class Settings(BaseSettings):
     LLM_TEMP: float = 0.2
     LLM_MAX_TOKENS: int = 4000
 
-    # API keys (optional per provider)
+    # LLM credentials (optional)
     OPENAI_API_KEY: Optional[str] = None
     ANTHROPIC_API_KEY: Optional[str] = None
     AZURE_OPENAI_API_KEY: Optional[str] = None
@@ -35,7 +40,10 @@ class Settings(BaseSettings):
     ]
 
     # Filesystem
-    OUTPUT_DIR: str = "/output"
+    OUTPUT_DIR: str = "./output"
+
+    # Optional: path to drawio CLI binary; if not set we try 'drawio' on PATH
+    DRAWIO_BIN: Optional[str] = None
 
     model_config = SettingsConfigDict(env_file=".env", case_sensitive=False)
 

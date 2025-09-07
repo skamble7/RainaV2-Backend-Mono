@@ -160,3 +160,21 @@ async def api_delete_kind(
     if not ok:
         raise HTTPException(status_code=404, detail=f"Kind '{kind_id}' not found")
     return {"ok": True}
+
+@router.post("/kinds/exists")
+async def api_kinds_exists(
+    body: Dict[str, List[str]],
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    ids = list(set(body.get("ids") or []))
+    if not ids:
+        return {"valid": [], "invalid": []}
+    found = []
+    for kid in ids:
+        doc = await get_kind(db, kid)
+        if doc:
+            found.append(kid)
+    valid = set(found)
+    invalid = [k for k in ids if k not in valid]
+    return {"valid": sorted(list(valid)), "invalid": sorted(invalid)}
+

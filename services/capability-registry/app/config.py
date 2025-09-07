@@ -18,4 +18,7 @@ class Settings(BaseModel):
     # Event org/tenant segment (routing key becomes: <events_org>.<service>.<event>.v1)
     events_org: str = os.getenv("EVENTS_ORG", "raina")
 
+    # Artifact-service base URL (used to validate produces_kinds)
+    artifact_service_url: str = os.getenv("ARTIFACT_SERVICE_URL", "http://localhost:8011")
+
 settings = Settings()

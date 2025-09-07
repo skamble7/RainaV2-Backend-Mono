@@ -1,3 +1,4 @@
+# services/workspace-service/app/logging_conf.py
 import logging
 import sys
 
